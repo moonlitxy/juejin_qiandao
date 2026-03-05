@@ -1,0 +1,46 @@
+# 掘金签到插件 - Git忽略文件
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+
+# Node.js (如果将来使用)
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# Chrome Extension 打包文件
+*.zip
+*.crx
+
+# 用户数据（不要提交个人配置）
+*.user.json
+config.local.json
+
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 测试文件
+test/
+*.test.js
+coverage/

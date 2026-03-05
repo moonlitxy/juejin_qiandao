@@ -1,0 +1,18 @@
+{
+    "name": "juejin-qiandao-extension",
+    "version": "1.0.0",
+    "description": "掘金自动签到浏览器插件",
+    "main": "background.js",
+    "scripts": {
+        "test": "echo \"暂无测试\" && exit 0"
+    },
+    "keywords": [
+        "juejin",
+        "check-in",
+        "sign-in",
+        "auto",
+        "chrome-extension"
+    ],
+    "author": "",
+    "license": "MIT"
+}

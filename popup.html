@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>掘金签到</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <div class="logo">
+                <span class="logo-icon">⛏️</span>
+                <h1>掘金自动签到</h1>
+            </div>
+        </div>
+
+        <!-- 签到状态 -->
+        <div class="status-section">
+            <div class="status-card">
+                <div class="status-icon" id="statusIcon">✓</div>
+                <div class="status-info">
+                    <div class="status-title" id="statusTitle">加载中...</div>
+                    <div class="status-desc" id="statusDesc">正在获取签到状态</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 签到统计 -->
+        <div class="stats-section">
+            <div class="stat-item">
+                <div class="stat-value" id="consecutiveDays">0</div>
+                <div class="stat-label">连续签到天数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="totalDays">0</div>
+                <div class="stat-label">本月签到天数</div>
+            </div>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="action-section">
+            <button class="btn btn-primary" id="manualCheckInBtn">
+                <span class="btn-icon">📝</span>
+                <span>立即签到</span>
+            </button>
+            <button class="btn btn-secondary" id="openJuejinBtn">
+                <span class="btn-icon">🔗</span>
+                <span>打开掘金</span>
+            </button>
+        </div>
+
+        <!-- 快速设置 -->
+        <div class="settings-section">
+            <div class="setting-item">
+                <label class="setting-label">自动签到</label>
+                <label class="switch">
+                    <input type="checkbox" id="autoCheckInToggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="setting-item">
+                <label class="setting-label">签到时间</label>
+                <input type="time" class="time-input" id="checkInTime" value="09:00">
+            </div>
+        </div>
+
+        <!-- 底部信息 -->
+        <div class="footer">
+            <div class="footer-info">
+                <span id="lastCheckInTime">上次签到: 从未</span>
+            </div>
+            <button class="btn-text" id="optionsBtn">⚙️ 设置</button>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

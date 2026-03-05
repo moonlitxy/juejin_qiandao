@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>掘金签到插件设置</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>⛏️ 掘金签到插件设置</h1>
+            <p class="subtitle">自定义你的自动签到体验</p>
+        </div>
+
+        <!-- 主要内容 -->
+        <div class="content">
+            <!-- 基本设置 -->
+            <section class="section">
+                <h2 class="section-title">基本设置</h2>
+
+                <div class="setting-group">
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">启用自动签到</h3>
+                            <p class="setting-desc">开启后将自动执行每日签到</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="enabledToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">签到时间</h3>
+                            <p class="setting-desc">设置每日自动签到的执行时间</p>
+                        </div>
+                        <input type="time" id="checkInTime" class="time-input">
+                    </div>
+                </div>
+            </section>
+
+            <!-- 通知设置 -->
+            <section class="section">
+                <h2 class="section-title">通知设置</h2>
+
+                <div class="setting-group">
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">签到成功通知</h3>
+                            <p class="setting-desc">签到成功时显示桌面通知</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="successNotification">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">签到失败通知</h3>
+                            <p class="setting-desc">签到失败时显示桌面通知</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="failureNotification">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 高级设置 -->
+            <section class="section">
+                <h2 class="section-title">高级设置</h2>
+
+                <div class="setting-group">
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">签到重试次数</h3>
+                            <p class="setting-desc">签到失败后的自动重试次数</p>
+                        </div>
+                        <select id="retryCount" class="select-input">
+                            <option value="0">不重试</option>
+                            <option value="1">1次</option>
+                            <option value="2">2次</option>
+                            <option value="3">3次</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">页面加载超时</h3>
+                            <p class="setting-desc">等待掘金页面加载的超时时间（秒）</p>
+                        </div>
+                        <select id="loadTimeout" class="select-input">
+                            <option value="10">10秒</option>
+                            <option value="20">20秒</option>
+                            <option value="30" selected>30秒</option>
+                            <option value="60">60秒</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 签到历史 -->
+            <section class="section">
+                <h2 class="section-title">签到历史</h2>
+
+                <div class="history-container">
+                    <div class="history-header">
+                        <span>最近的签到记录</span>
+                        <button class="btn-text" id="clearHistoryBtn">清空历史</button>
+                    </div>
+
+                    <div class="history-list" id="historyList">
+                        <!-- 动态生成签到记录 -->
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- 底部 -->
+        <div class="footer">
+            <button class="btn btn-secondary" id="resetBtn">重置设置</button>
+            <button class="btn btn-primary" id="saveBtn">保存设置</button>
+        </div>
+    </div>
+
+    <script src="options.js"></script>
+</body>
+</html>
