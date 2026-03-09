@@ -23,7 +23,7 @@ async function executeCheckIn() {
         // 等待页面加载完成
         await waitForPageReady();
 
-        // 方法1: 尝试找到签到按钮
+        // 方法1: 尝试找到签到按钮（缓存结果供后续使用）
         const checkInButton = findCheckInButton();
         console.log('签到按钮查找结果:', checkInButton);
 
@@ -65,11 +65,11 @@ async function executeCheckIn() {
                 }));
             }
 
-            // 等待签到结果
-            await delay(3000);
+            // 等待签到结果（优化：减少等待时间）
+            await delay(2000);
 
-            // 检查签到后的页面状态
-            const afterCheckResult = await checkAfterCheckInStatus();
+            // 检查签到后的页面状态（传入已找到的按钮，避免重复查找）
+            const afterCheckResult = await checkAfterCheckInStatus(checkInButton);
             console.log('签到后状态检测结果:', afterCheckResult);
 
             if (afterCheckResult.alreadyCheckedIn) {
@@ -230,6 +230,7 @@ async function waitForPageReady() {
 
 // 判断是否已经签到
 function isAlreadyCheckedIn(buttonText, buttonClasses, buttonDisabled) {
+    // 预先转换为小写，避免重复调用 toLowerCase()
     const text = buttonText.trim().toLowerCase();
     const classes = buttonClasses.toLowerCase();
 
@@ -247,7 +248,8 @@ function isAlreadyCheckedIn(buttonText, buttonClasses, buttonDisabled) {
     ];
 
     for (const pattern of alreadyCheckedInPatterns) {
-        if (text.includes(pattern.toLowerCase()) || classes.includes(pattern.toLowerCase())) {
+        const patternLower = pattern.toLowerCase();
+        if (text.includes(patternLower) || classes.includes(patternLower)) {
             console.log(`匹配到已签到模式: ${pattern}`);
             return true;
         }
@@ -265,15 +267,18 @@ function isAlreadyCheckedIn(buttonText, buttonClasses, buttonDisabled) {
     return false;
 }
 
-// 检查签到后的状态
-async function checkAfterCheckInStatus() {
+// 检查签到后的状态（接收按钮参数，避免重复查找）
+async function checkAfterCheckInStatus(checkInButton = null) {
     console.log('检查签到后状态...');
 
     // 使用延迟函数等待页面更新
     await delay(1000);
 
-    // 再次检查按钮状态
-    const checkInButton = findCheckInButton();
+    // 如果没有传入按钮，才重新查找
+    if (!checkInButton) {
+        checkInButton = findCheckInButton();
+    }
+
     if (checkInButton) {
         const buttonText = (checkInButton.textContent || '').trim();
         const buttonClasses = (checkInButton.className || '').toLowerCase();
@@ -290,28 +295,41 @@ async function checkAfterCheckInStatus() {
         }
     }
 
-    // 检查页面提示信息
-    const pageText = document.body.textContent || '';
-
-    // 检查成功提示
+    // 检查页面提示信息（缩小查询范围，只检查特定区域）
     const successPatterns = ['签到成功', '打卡成功', '签到完成', '获得', '领取'];
-    for (const pattern of successPatterns) {
-        if (pageText.includes(pattern)) {
-            return {
-                success: true,
-                message: `签到成功 - ${pattern}`
-            };
-        }
-    }
-
-    // 检查重复签到提示
     const alreadyCheckedPatterns = ['已经签到', '今日已签到', '重复签到', '已经打卡'];
-    for (const pattern of alreadyCheckedPatterns) {
-        if (pageText.includes(pattern)) {
-            return {
-                alreadyCheckedIn: true,
-                message: '今天已经签到过了'
-            };
+
+    // 只检查可能包含提示信息的特定元素，而不是整个页面
+    const messageSelectors = [
+        '.message',
+        '.toast',
+        '.notification',
+        '.alert',
+        '[class*="message"]',
+        '[class*="toast"]',
+        '[class*="notification"]'
+    ];
+
+    for (const selector of messageSelectors) {
+        const elements = document.querySelectorAll(selector);
+        for (const element of elements) {
+            const text = element.textContent || '';
+            for (const pattern of successPatterns) {
+                if (text.includes(pattern)) {
+                    return {
+                        success: true,
+                        message: `签到成功 - ${pattern}`
+                    };
+                }
+            }
+            for (const pattern of alreadyCheckedPatterns) {
+                if (text.includes(pattern)) {
+                    return {
+                        alreadyCheckedIn: true,
+                        message: '今天已经签到过了'
+                    };
+                }
+            }
         }
     }
 
@@ -480,7 +498,7 @@ function checkLoginStatus() {
     return true; // 默认假设已登录
 }
 
-// 等待元素出现
+// 等待元素出现（修复内存泄漏：确保 observer 被正确清理）
 function waitForElement(selector, timeout = 10000) {
     return new Promise((resolve, reject) => {
         const element = document.querySelector(selector);
@@ -492,6 +510,7 @@ function waitForElement(selector, timeout = 10000) {
         const observer = new MutationObserver(() => {
             const element = document.querySelector(selector);
             if (element) {
+                // 立即断开 observer，防止内存泄漏
                 observer.disconnect();
                 resolve(element);
             }
@@ -502,7 +521,7 @@ function waitForElement(selector, timeout = 10000) {
             subtree: true
         });
 
-        // 设置超时
+        // 设置超时，确保清理 observer
         setTimeout(() => {
             observer.disconnect();
             reject(new Error(`等待元素超时: ${selector}`));

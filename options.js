@@ -1,17 +1,8 @@
 // options.js - 设置页面脚本
+// 依赖：shared/config.js, shared/messaging.js, shared/notification.js
 
-// 默认配置
-const defaultConfig = {
-    enabled: true,
-    checkInTime: '09:00',
-    successNotification: true,
-    failureNotification: true,
-    retryCount: 1,
-    loadTimeout: 30
-};
-
-// 当前配置
-let currentConfig = { ...defaultConfig };
+// 当前配置（使用 shared/config.js 中的 DEFAULT_CONFIG）
+let currentConfig = { ...DEFAULT_CONFIG };
 
 // DOM元素
 const elements = {
@@ -79,8 +70,8 @@ async function loadConfig() {
         const response = await sendMessage({ action: 'getConfig' });
         const savedConfig = response.config || {};
 
-        // 合并配置
-        currentConfig = { ...defaultConfig, ...savedConfig };
+        // 合并配置（使用 shared/config.js 中的 DEFAULT_CONFIG）
+        currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
 
         // 更新UI
         elements.enabledToggle.checked = currentConfig.enabled;
@@ -92,7 +83,7 @@ async function loadConfig() {
 
     } catch (error) {
         console.error('加载配置失败:', error);
-        showNotification('加载配置失败', 'error');
+        showPageNotification('加载配置失败', 'error');
     }
 }
 
@@ -118,39 +109,39 @@ async function saveConfig() {
         // 更新当前配置
         currentConfig = newConfig;
 
-        showNotification('设置已保存', 'success');
+        showPageNotification('设置已保存', 'success');
 
     } catch (error) {
         console.error('保存配置失败:', error);
-        showNotification('保存配置失败', 'error');
+        showPageNotification('保存配置失败', 'error');
     }
 }
 
 // 重置配置
 async function resetConfig() {
     try {
-        // 重置为默认配置
+        // 重置为默认配置（使用 shared/config.js 中的 DEFAULT_CONFIG）
         await sendMessage({
             action: 'updateConfig',
-            config: defaultConfig
+            config: DEFAULT_CONFIG
         });
 
         // 更新当前配置
-        currentConfig = { ...defaultConfig };
+        currentConfig = { ...DEFAULT_CONFIG };
 
         // 更新UI
-        elements.enabledToggle.checked = defaultConfig.enabled;
-        elements.checkInTime.value = defaultConfig.checkInTime;
-        elements.successNotification.checked = defaultConfig.successNotification;
-        elements.failureNotification.checked = defaultConfig.failureNotification;
-        elements.retryCount.value = defaultConfig.retryCount;
-        elements.loadTimeout.value = defaultConfig.loadTimeout;
+        elements.enabledToggle.checked = DEFAULT_CONFIG.enabled;
+        elements.checkInTime.value = DEFAULT_CONFIG.checkInTime;
+        elements.successNotification.checked = DEFAULT_CONFIG.successNotification;
+        elements.failureNotification.checked = DEFAULT_CONFIG.failureNotification;
+        elements.retryCount.value = DEFAULT_CONFIG.retryCount;
+        elements.loadTimeout.value = DEFAULT_CONFIG.loadTimeout;
 
-        showNotification('设置已重置', 'success');
+        showPageNotification('设置已重置', 'success');
 
     } catch (error) {
         console.error('重置配置失败:', error);
-        showNotification('重置配置失败', 'error');
+        showPageNotification('重置配置失败', 'error');
     }
 }
 
@@ -223,82 +214,15 @@ async function clearHistory() {
         // 重新加载历史
         await loadHistory();
 
-        showNotification('历史记录已清空', 'success');
+        showPageNotification('历史记录已清空', 'success');
 
     } catch (error) {
         console.error('清空历史记录失败:', error);
-        showNotification('清空历史记录失败', 'error');
+        showPageNotification('清空历史记录失败', 'error');
     }
 }
 
-// 发送消息到background
-function sendMessage(message) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(message, (response) => {
-            if (chrome.runtime.lastError) {
-                reject(chrome.runtime.lastError);
-            } else {
-                resolve(response);
-            }
-        });
-    });
-}
+// 注意：以下函数已移至共享脚本，避免重复定义
+// - sendMessage() -> shared/messaging.js
+// - showNotification() -> shared/notification.js (更名为 showPageNotification)
 
-// 显示通知
-function showNotification(message, type = 'info') {
-    // 创建通知元素
-    const notification = document.createElement('div');
-    notification.className = `notification notification-${type}`;
-    notification.textContent = message;
-
-    // 添加样式
-    notification.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background: ${type === 'success' ? '#4caf50' : type === 'error' ? '#f44336' : '#2196f3'};
-        color: white;
-        padding: 12px 24px;
-        border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        z-index: 10000;
-        animation: slideIn 0.3s ease-out;
-    `;
-
-    // 添加动画
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes slideIn {
-            from {
-                transform: translateX(400px);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-        @keyframes slideOut {
-            from {
-                transform: translateX(0);
-                opacity: 1;
-            }
-            to {
-                transform: translateX(400px);
-                opacity: 0;
-            }
-        }
-    `;
-    document.head.appendChild(style);
-
-    // 添加到页面
-    document.body.appendChild(notification);
-
-    // 3秒后移除
-    setTimeout(() => {
-        notification.style.animation = 'slideOut 0.3s ease-out';
-        setTimeout(() => {
-            document.body.removeChild(notification);
-        }, 300);
-    }, 3000);
-}

@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "掘金自动签到",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "自动完成掘金技术博客网站的每日签到",
     "permissions": [
         "storage",
@@ -19,7 +19,7 @@
     "content_scripts": [
         {
             "matches": ["https://juejin.cn/*", "https://*.juejin.cn/*"],
-            "js": ["content.js"],
+            "js": ["shared/config.js", "content.js"],
             "run_at": "document_idle"
         }
     ],

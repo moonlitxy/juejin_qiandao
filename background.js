@@ -1,23 +1,27 @@
 // background.js - 后台服务脚本
 // 负责处理定时任务、存储管理和消息通信
 
+// 默认配置（应该与 shared/config.js 保持一致，但因为 Service Worker 无法直接加载 shared 脚本）
+const DEFAULT_CONFIG = {
+    enabled: true,              // 是否启用自动签到
+    checkInTime: '09:00',       // 签到时间（24小时制）
+    lastCheckInDate: null,      // 最后签到日期
+    checkInHistory: [],         // 签到历史记录
+    consecutiveDays: 0,         // 连续签到天数
+    successNotification: true,  // 成功通知开关
+    failureNotification: true,  // 失败通知开关
+    retryCount: 1,              // 重试次数
+    loadTimeout: 30             // 页面加载超时（秒）
+};
+
 // 插件安装或更新时初始化
 chrome.runtime.onInstalled.addListener(async () => {
     console.log('掘金签到插件已安装');
 
-    // 设置默认配置
-    const defaultConfig = {
-        enabled: true,              // 是否启用自动签到
-        checkInTime: '09:00',       // 签到时间（24小时制）
-        lastCheckInDate: null,      // 最后签到日期
-        checkInHistory: [],         // 签到历史记录
-        consecutiveDays: 0          // 连续签到天数
-    };
-
     // 保存默认配置到存储
     await chrome.storage.local.get(['config'], (result) => {
         if (!result.config) {
-            chrome.storage.local.set({ config: defaultConfig });
+            chrome.storage.local.set({ config: DEFAULT_CONFIG });
         }
     });
 
@@ -98,7 +102,8 @@ async function performCheckIn() {
 
             // 处理签到结果（包括重复签到的情况）
             if (response && (response.success || response.alreadyCheckedIn)) {
-                await updateCheckInHistory(response);
+                // 传递已读取的 config，避免重复读取存储
+                await updateCheckInHistory(response, config);
                 const message = response.alreadyCheckedIn ?
                     '今天已经签到过了' :
                     (response.message || '掘金签到完成！');
@@ -128,42 +133,50 @@ async function performCheckIn() {
     }
 }
 
-// 等待标签页加载完成
+// 等待标签页加载完成（使用事件监听，避免轮询）
 function waitForTabLoaded(tabId, timeout) {
     return new Promise((resolve, reject) => {
-        const startTime = Date.now();
-
-        const checkLoaded = () => {
-            // 检查超时
-            if (Date.now() - startTime > timeout) {
-                reject(new Error('页面加载超时'));
+        // 首先检查当前状态
+        chrome.tabs.get(tabId, (tab) => {
+            if (chrome.runtime.lastError) {
+                reject(chrome.runtime.lastError);
                 return;
             }
 
-            // 检查标签页状态
-            chrome.tabs.get(tabId, (tab) => {
-                if (chrome.runtime.lastError) {
-                    reject(chrome.runtime.lastError);
-                    return;
-                }
+            // 如果已经加载完成，直接返回
+            if (tab.status === 'complete') {
+                resolve();
+                return;
+            }
 
-                if (tab.status === 'complete') {
+            // 否则监听更新事件
+            const listener = (updatedTabId, changeInfo) => {
+                if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                    chrome.tabs.onUpdated.removeListener(listener);
                     resolve();
-                } else {
-                    // 继续等待
-                    setTimeout(checkLoaded, 500);
                 }
-            });
-        };
+            };
 
-        checkLoaded();
+            chrome.tabs.onUpdated.addListener(listener);
+
+            // 设置超时，确保清理监听器
+            setTimeout(() => {
+                chrome.tabs.onUpdated.removeListener(listener);
+                reject(new Error('页面加载超时'));
+            }, timeout);
+        });
     });
 }
 
 // 更新签到历史记录
-async function updateCheckInHistory(result) {
+async function updateCheckInHistory(result, config = null) {
     try {
-        const { config } = await chrome.storage.local.get(['config']);
+        // 如果没有传入 config，再从存储读取（避免重复读取）
+        if (!config) {
+            const result = await chrome.storage.local.get(['config']);
+            config = result.config;
+        }
+
         const today = new Date().toDateString();
 
         console.log('更新签到历史，当前结果:', result);

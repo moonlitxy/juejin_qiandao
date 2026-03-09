@@ -1,4 +1,5 @@
 // popup.js - 弹出窗口脚本
+// 依赖：shared/config.js, shared/messaging.js, shared/notification.js
 
 // DOM元素引用
 const elements = {
@@ -33,18 +34,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 绑定事件监听器
     bindEventListeners();
 
-    // 加载配置并更新UI
-    await loadConfig();
+    // 加载配置并更新UI（合并为一次存储读取）
+    const config = await loadConfig();
 
-    // 更新签到状态
-    await updateCheckInStatus();
+    // 更新签到状态（传入已读取的 config，避免重复读取）
+    updateCheckInStatus(config);
 
     // 监听来自background的消息（签到完成后更新状态）
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'checkInCompleted') {
             console.log('收到签到完成通知，刷新状态');
-            loadConfig();
-            updateCheckInStatus();
+            loadConfig().then(config => {
+                updateCheckInStatus(config);
+            });
         }
     });
 });
@@ -77,7 +79,7 @@ function bindEventListeners() {
     });
 }
 
-// 加载配置
+// 加载配置（返回 config 对象，避免重复读取存储）
 async function loadConfig() {
     try {
         const response = await sendMessage({ action: 'getConfig' });
@@ -90,17 +92,23 @@ async function loadConfig() {
         // 更新统计信息
         updateStatistics(config);
 
+        // 返回 config 供其他函数使用
+        return config;
+
     } catch (error) {
         console.error('加载配置失败:', error);
         showError('加载配置失败');
+        return null;
     }
 }
 
-// 更新签到状态
-async function updateCheckInStatus() {
+// 更新签到状态（接收 config 参数，避免重复读取存储）
+function updateCheckInStatus(config) {
     try {
-        const response = await sendMessage({ action: 'getConfig' });
-        const config = response.config || {};
+        if (!config) {
+            console.warn('config 为空，跳过更新签到状态');
+            return;
+        }
 
         console.log('Popup更新签到状态，当前配置:', config);
 
@@ -256,26 +264,8 @@ async function updateConfig(updates) {
     }
 }
 
-// 发送消息到background
-function sendMessage(message) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(message, (response) => {
-            if (chrome.runtime.lastError) {
-                reject(chrome.runtime.lastError);
-            } else {
-                resolve(response);
-            }
-        });
-    });
-}
+// 注意：以下函数已移至共享脚本，避免重复定义
+// - sendMessage() -> shared/messaging.js
+// - showSuccess() -> shared/notification.js
+// - showError() -> shared/notification.js
 
-// 显示成功提示
-function showSuccess(message) {
-    // 简单的提示，可以使用更复杂的toast组件
-    console.log('成功:', message);
-}
-
-// 显示错误提示
-function showError(message) {
-    console.error('错误:', message);
-}
