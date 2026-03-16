@@ -44,3 +44,4 @@ config.local.json
 test/
 *.test.js
 coverage/
+docs/

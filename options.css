@@ -191,6 +191,11 @@ input:checked + .slider:before {
     color: #333;
 }
 
+.history-actions {
+    display: flex;
+    gap: 8px;
+}
+
 .btn-text {
     background: none;
     border: none;

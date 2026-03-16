@@ -15,7 +15,8 @@ const elements = {
     historyList: null,
     saveBtn: null,
     resetBtn: null,
-    clearHistoryBtn: null
+    clearHistoryBtn: null,
+    resetTodayBtn: null
 };
 
 // 初始化
@@ -31,6 +32,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.saveBtn = document.getElementById('saveBtn');
     elements.resetBtn = document.getElementById('resetBtn');
     elements.clearHistoryBtn = document.getElementById('clearHistoryBtn');
+    elements.resetTodayBtn = document.getElementById('resetTodayBtn');
 
     // 绑定事件
     bindEventListeners();
@@ -60,6 +62,13 @@ function bindEventListeners() {
     elements.clearHistoryBtn.addEventListener('click', async () => {
         if (confirm('确定要清空所有签到历史记录吗？')) {
             await clearHistory();
+        }
+    });
+
+    // 重置今日状态按钮
+    elements.resetTodayBtn.addEventListener('click', async () => {
+        if (confirm('确定要重置今日签到状态吗？这将允许今日重新签到。')) {
+            await resetTodayStatus();
         }
     });
 }
@@ -204,6 +213,11 @@ async function clearHistory() {
 
         // 清空历史
         config.checkInHistory = [];
+        // 同时清除最后签到日期和连续天数，重置签到状态
+        config.lastCheckInDate = null;
+        config.consecutiveDays = 0;
+
+        console.log('清空历史记录并重置签到状态');
 
         // 保存配置
         await sendMessage({
@@ -214,11 +228,45 @@ async function clearHistory() {
         // 重新加载历史
         await loadHistory();
 
-        showPageNotification('历史记录已清空', 'success');
+        showPageNotification('历史记录已清空，签到状态已重置', 'success');
 
     } catch (error) {
         console.error('清空历史记录失败:', error);
         showPageNotification('清空历史记录失败', 'error');
+    }
+}
+
+// 重置今日签到状态（不清空历史记录）
+async function resetTodayStatus() {
+    try {
+        const response = await sendMessage({ action: 'getConfig' });
+        const config = response.config || {};
+
+        // 只清除最后签到日期，保留历史记录和连续天数
+        const today = new Date().toDateString();
+        if (config.lastCheckInDate === today) {
+            config.lastCheckInDate = null;
+            console.log('已重置今日签到状态，保留历史记录');
+        } else {
+            console.log('今日未签到，无需重置');
+            showPageNotification('今日未签到，无需重置', 'info');
+            return;
+        }
+
+        // 保存配置
+        await sendMessage({
+            action: 'updateConfig',
+            config: config
+        });
+
+        // 重新加载历史
+        await loadHistory();
+
+        showPageNotification('今日签到状态已重置', 'success');
+
+    } catch (error) {
+        console.error('重置今日状态失败:', error);
+        showPageNotification('重置今日状态失败', 'error');
     }
 }
 
