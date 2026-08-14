@@ -69,12 +69,32 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === 'dailyCheckIn') {
         console.log('定时签到触发');
         await performCheckIn();
+    } else if (alarm.name === 'checkInRetry') {
+        // MV3 service worker 可能被终止，重试状态存 storage.session，由闹钟恢复
+        console.log('签到重试闹钟触发');
+        const { checkInRetry } = await chrome.storage.session.get('checkInRetry');
+        if (!checkInRetry) {
+            return;
+        }
+        await chrome.storage.session.remove('checkInRetry');
+        await performCheckIn(checkInRetry);
     }
 });
 
 // 执行签到操作
-async function performCheckIn() {
+// resumeState 为上次重试持久化的状态（service worker 重启后由闹钟恢复）
+async function performCheckIn(resumeState = null) {
     try {
+        // 恢复重试时直接继续签到尝试
+        if (resumeState) {
+            await runCheckInAttempt(resumeState);
+            return;
+        }
+
+        // 新的签到流程开始前，清理可能残留的重试闹钟和状态
+        await chrome.alarms.clear('checkInRetry');
+        await chrome.storage.session.remove('checkInRetry');
+
         // 检查今天是否已经签到
         const today = new Date().toDateString();
         const { config } = await chrome.storage.local.get(['config']);
@@ -137,164 +157,198 @@ async function performCheckIn() {
         }
 
         // 【改进】支持页面跳转的签到流程
-        const maxRetries = 10;
-        let retryCount = 0;
-        let currentUrl = finalUrl;
-
-        // 先测试 content script 是否准备好
-        const testContentScriptReady = () => {
-            return new Promise((resolve) => {
-                chrome.tabs.sendMessage(tab.id, { action: 'ping' }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.log('⚠️ content script 未就绪:', chrome.runtime.lastError.message);
-                        resolve(false);
-                    } else if (response && response.action === 'pong') {
-                        console.log('✅ content script 已就绪');
-                        resolve(true);
-                    } else {
-                        resolve(false);
-                    }
-                });
-            });
-        };
-
-        const trySendCheckIn = async () => {
-            console.log(`📤 尝试发送签到消息 (${retryCount + 1}/${maxRetries})...`);
-            console.log('📍 当前页面 URL:', currentUrl);
-
-            // 先测试 content script 是否准备好
-            const isReady = await testContentScriptReady();
-            if (!isReady) {
-                console.error('❌ content script 未就绪');
-                retryCount++;
-
-                if (retryCount < maxRetries) {
-                    // 更新当前 URL
-                    try {
-                        const updatedTab = await chrome.tabs.get(tab.id);
-                        currentUrl = updatedTab.url;
-                        console.log('🔄 更新后的 URL:', currentUrl);
-                    } catch (e) {
-                        console.log('⚠️ 无法获取更新后的 URL');
-                    }
-
-                    console.log(`⏳ 3秒后重试 (${retryCount}/${maxRetries})...`);
-                    setTimeout(trySendCheckIn, 3000);
-                    return;
-                }
-
-                showNotification('签到失败', '页面脚本未就绪，请刷新插件后重试');
-                chrome.tabs.remove(tab.id);
-                return;
-            }
-
-            // content script 已就绪，发送签到消息
-            chrome.tabs.sendMessage(tab.id, { action: 'checkIn' }, async (response) => {
-                // 检查是否有错误
-                if (chrome.runtime.lastError) {
-                    const errorMsg = chrome.runtime.lastError.message;
-                    console.error('❌ 发送签到消息失败:', errorMsg);
-
-                    // 检查是否是消息通道关闭错误
-                    if (errorMsg.includes('message channel closed') || errorMsg.includes('async response')) {
-                        console.log('🔄 消息通道关闭，可能是页面跳转或签到成功后刷新');
-
-                        // 等待一段时间后，通过 API 验证签到状态
-                        retryCount++;
-
-                        if (retryCount < maxRetries) {
-                            setTimeout(async () => {
-                                try {
-                                    const updatedTab = await chrome.tabs.get(tab.id);
-                                    currentUrl = updatedTab.url;
-                                    console.log('🔄 页面跳转后的 URL:', currentUrl);
-
-                                    // 如果在签到页面，等待更长时间确保 API 请求完成
-                                    if (currentUrl && (currentUrl.includes('checkin') || currentUrl.includes('lottery'))) {
-                                        console.log('✅ 在签到页面，等待 API 请求完成...');
-                                        await new Promise(resolve => setTimeout(resolve, 5000));
-                                    }
-
-                                    // 重新尝试发送签到消息
-                                    trySendCheckIn();
-                                } catch (e) {
-                                    console.error('❌ 获取更新后的标签页失败:', e);
-                                    setTimeout(trySendCheckIn, 3000);
-                                }
-                            }, 5000); // 增加等待时间到 5 秒
-                            return;
-                        }
-
-                        // 已达到最大重试次数，最后尝试通过 API 验证签到状态
-                        console.log('⚠️ 已达到最大重试次数，最后尝试通过 API 验证...');
-                        const finalResult = await verifyCheckInViaApi(tab.id);
-                        if (finalResult.success || finalResult.alreadyCheckedIn) {
-                            await updateCheckInHistory(finalResult, config);
-                            showNotification('签到成功', finalResult.message || '签到可能已完成');
-                            chrome.tabs.remove(tab.id);
-                            return;
-                        }
-                    }
-
-                    showNotification('签到失败', '发送消息失败: ' + errorMsg);
-                    chrome.tabs.remove(tab.id);
-                    return;
-                }
-
-                console.log('✅ 收到 content script 响应:', response);
-
-                // 检查是否需要重定向
-                if (response && response.needRedirect && response.redirectUrl) {
-                    console.log('🔀 收到重定向请求:', response.redirectUrl);
-
-                    // 更新标签页 URL
-                    await chrome.tabs.update(tab.id, { url: response.redirectUrl });
-                    console.log('✅ 已更新标签页 URL');
-
-                    // 等待新页面加载
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-
-                    // 重新尝试发送签到消息
-                    retryCount++;
-                    setTimeout(trySendCheckIn, 1000);
-                    return;
-                }
-
-                // 处理签到结果（包括重复签到的情况）
-                if (response && (response.success || response.alreadyCheckedIn)) {
-                    // 传递已读取的 config，避免重复读取存储
-                    await updateCheckInHistory(response, config);
-                    const message = response.alreadyCheckedIn ?
-                        '今天已经签到过了' :
-                        (response.message || '掘金签到完成！');
-                    showNotification('签到成功', message);
-
-                    // 通知popup更新状态
-                    chrome.runtime.sendMessage({
-                        action: 'checkInCompleted',
-                        result: response
-                    }).catch(() => {
-                        // popup可能没有打开，忽略错误
-                        console.log('通知popup更新状态失败，popup可能未打开');
-                    });
-                } else {
-                    showNotification('签到失败', response?.message || '签到操作失败，请手动检查');
-                }
-
-                // 延迟关闭标签页（给用户看结果的时间）
-                setTimeout(() => {
-                    chrome.tabs.remove(tab.id);
-                }, 3000);
-            });
+        const state = {
+            tabId: tab.id,
+            config,
+            maxRetries: 10,
+            retryCount: 0,
+            currentUrl: finalUrl
         };
 
         // 首次尝试发送消息
-        trySendCheckIn();
+        await runCheckInAttempt(state);
 
     } catch (error) {
         console.error('签到过程出错:', error);
         showNotification('签到出错', error.message);
     }
+}
+
+// 执行一次签到尝试；需要重试时通过 alarms 调度下一次（MV3 下比 setTimeout 更可靠）
+async function runCheckInAttempt(state) {
+    const { tabId, config } = state;
+    console.log(`📤 尝试发送签到消息 (${state.retryCount + 1}/${state.maxRetries})...`);
+
+    // 先刷新当前 URL
+    try {
+        const updatedTab = await chrome.tabs.get(tabId);
+        state.currentUrl = updatedTab.url;
+        console.log('📍 当前页面 URL:', state.currentUrl);
+    } catch (e) {
+        console.log('⚠️ 无法获取当前页面 URL');
+    }
+
+    // 先测试 content script 是否准备好
+    const isReady = await testContentScriptReady(tabId);
+    if (!isReady) {
+        console.warn('⚠️ content script 未就绪，等待页面注入后重试');
+        state.retryCount++;
+
+        if (state.retryCount < state.maxRetries) {
+            await scheduleCheckInRetry(state);
+            return;
+        }
+
+        // 即使 content script 始终未就绪，也要先通过 API 验证签到状态，
+        // 因为首次点击可能已经触发签到成功
+        const apiResult = await verifyCheckInViaApi(tabId);
+        if (await finalizeIfApiVerified(apiResult, config, tabId)) {
+            return;
+        }
+
+        // API 验证未确认已签到，尝试通过 API 直接签到
+        const apiCheckResult = await attemptCheckInViaApi(tabId);
+        if (await finalizeIfApiVerified(apiCheckResult, config, tabId)) {
+            return;
+        }
+
+        showNotification('签到失败', apiCheckResult.message || apiResult.message || '页面脚本未就绪，请刷新插件后重试');
+        chrome.tabs.remove(tabId);
+        return;
+    }
+
+    // content script 已就绪，发送签到消息
+    let response;
+    try {
+        response = await chrome.tabs.sendMessage(tabId, { action: 'checkIn' });
+    } catch (error) {
+        const errorMsg = error.message || String(error);
+        // 签到按钮点击后页面常会跳转/刷新，content script 上下文销毁会导致消息通道关闭、
+        // 响应丢失；此时签到可能已经触发，不能直接当失败处理，一律先通过 API 验证。
+        console.warn('⚠️ 签到消息未收到响应，可能是页面跳转/刷新导致通道关闭:', errorMsg);
+
+        // 等待页面稳定（让跳转完成或 API 请求完成）
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        try {
+            const updatedTab = await chrome.tabs.get(tabId);
+            state.currentUrl = updatedTab.url;
+            console.log('🔄 页面跳转后的 URL:', state.currentUrl);
+
+            // 如果在签到页面，等待更长时间确保 API 请求完成
+            if (state.currentUrl && (state.currentUrl.includes('checkin') || state.currentUrl.includes('lottery'))) {
+                console.log('✅ 在签到页面，等待 API 请求完成...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+        } catch (e) {
+            console.warn('⚠️ 获取更新后的标签页失败:', e);
+        }
+
+        // 通过 API 验证签到状态（通道关闭往往意味着签到已触发）
+        const apiResult = await verifyCheckInViaApi(tabId);
+        if (await finalizeIfApiVerified(apiResult, config, tabId)) {
+            return;
+        }
+
+        // API 验证未确认已签到，尝试通过 API 直接签到
+        const apiCheckResult = await attemptCheckInViaApi(tabId);
+        if (await finalizeIfApiVerified(apiCheckResult, config, tabId)) {
+            return;
+        }
+
+        // 仍未确认，走重试流程
+        console.log('⚠️ API 未确认已签到，准备重试签到...');
+        state.retryCount++;
+        if (state.retryCount < state.maxRetries) {
+            await scheduleCheckInRetry(state);
+            return;
+        }
+
+        // 重试已耗尽，最后一次 API 验证刚刚已执行，确认失败
+        showNotification('签到失败', apiCheckResult.message || apiResult.message || '无法确认签到状态，请手动检查');
+        chrome.tabs.remove(tabId);
+        return;
+    }
+
+    console.log('✅ 收到 content script 响应:', response);
+
+    // 检查是否需要重定向
+    if (response && response.needRedirect && response.redirectUrl) {
+        console.log('🔀 收到重定向请求:', response.redirectUrl);
+
+        // 更新标签页 URL
+        await chrome.tabs.update(tabId, { url: response.redirectUrl });
+        console.log('✅ 已更新标签页 URL');
+
+        // 等待新页面加载
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        // 重新尝试发送签到消息
+        state.retryCount++;
+        await scheduleCheckInRetry(state, 1000);
+        return;
+    }
+
+    // 处理签到结果（包括重复签到的情况）
+    if (response && (response.success || response.alreadyCheckedIn)) {
+        await finalizeCheckInSuccess(response, config);
+    } else {
+        showNotification('签到失败', response?.message || '签到操作失败，请手动检查');
+    }
+
+    // 延迟关闭标签页（给用户看结果的时间）
+    setTimeout(() => {
+        chrome.tabs.remove(tabId);
+    }, 3000);
+}
+
+// 调度下一次签到重试（状态持久化到 storage.session，闹钟触发后由 service worker 恢复）
+async function scheduleCheckInRetry(state, delayMs = 3000) {
+    console.log(`⏳ ${delayMs / 1000}秒后重试 (${state.retryCount}/${state.maxRetries})...`);
+    await chrome.storage.session.set({ checkInRetry: state });
+    chrome.alarms.create('checkInRetry', { when: Date.now() + delayMs });
+}
+
+// 测试 content script 是否就绪
+async function testContentScriptReady(tabId) {
+    try {
+        const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+        if (response && response.action === 'pong') {
+            console.log('✅ content script 已就绪');
+            return true;
+        }
+    } catch (e) {
+        console.log('⚠️ content script 未就绪:', e.message);
+    }
+    return false;
+}
+
+// 签到成功统一处理：更新历史、展示通知、广播给 popup
+async function finalizeCheckInSuccess(result, config) {
+    // 传递已读取的 config，避免重复读取存储
+    await updateCheckInHistory(result, config);
+    const message = result.alreadyCheckedIn ?
+        (result.message || '今天已经签到过了') :
+        (result.message || '掘金签到完成！');
+    showNotification('签到成功', message);
+
+    // 通知 popup 更新状态（popup 可能没有打开，忽略错误）
+    chrome.runtime.sendMessage({
+        action: 'checkInCompleted',
+        result: result
+    }).catch(() => {
+        console.log('通知popup更新状态失败，popup可能未打开');
+    });
+}
+
+// API 结果确认已签到时的统一处理：更新历史、通知、关闭标签页
+async function finalizeIfApiVerified(apiResult, config, tabId) {
+    if (apiResult.success || apiResult.alreadyCheckedIn) {
+        console.log('✅ API 确认：签到已成功！');
+        await finalizeCheckInSuccess(apiResult, config);
+        chrome.tabs.remove(tabId);
+        return true;
+    }
+    return false;
 }
 
 // 通过 API 验证签到状态（用于消息通道关闭后的备用验证）
@@ -312,6 +366,10 @@ async function verifyCheckInViaApi(tabId) {
                         credentials: 'include'
                     });
 
+                    if (response.status === 401) {
+                        return { success: false, message: '请先登录掘金账号' };
+                    }
+
                     if (response.ok) {
                         const data = await response.json();
                         console.log('📋 API 验证响应:', JSON.stringify(data));
@@ -325,12 +383,18 @@ async function verifyCheckInViaApi(tabId) {
                             } else if (todayStatus === 0 || hasCheckIn === false) {
                                 return { success: false, message: '今日未签到（API 验证）' };
                             }
+                        } else if (data.err_no !== 0) {
+                            const errMsg = data.err_msg || `API 验证失败 (err_no: ${data.err_no})`;
+                            if (errMsg.includes('登录')) {
+                                return { success: false, message: '请先登录掘金账号' };
+                            }
+                            return { success: false, message: errMsg };
                         }
                     }
-                    return { success: false, message: '无法验证签到状态' };
+                    return { success: false, message: `API 验证请求失败 (${response.status})` };
                 } catch (error) {
                     console.error('API 验证异常:', error);
-                    return { success: false, message: error.message };
+                    return { success: false, message: `API 验证异常: ${error.message}` };
                 }
             }
         });
@@ -344,6 +408,58 @@ async function verifyCheckInViaApi(tabId) {
     } catch (error) {
         console.error('❌ API 验证失败:', error);
         return { success: false, message: error.message };
+    }
+}
+
+// 通过 API 直接签到（content script 不可用时的备用方案）
+async function attemptCheckInViaApi(tabId) {
+    try {
+        console.log('🔧 尝试使用 API 直接签到...');
+
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: async () => {
+                try {
+                    const response = await fetch('https://api.juejin.cn/growth_api/v1/check_in', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (response.status === 401) {
+                        return { success: false, message: '请先登录掘金账号' };
+                    }
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log('📋 API 签到完整响应:', JSON.stringify(data));
+
+                        if (data.err_no === 0) {
+                            return { success: true, message: 'API 签到成功' };
+                        } else if (data.err_no === 10001 || data.err_msg?.includes('重复') || data.err_msg?.includes('已经')) {
+                            return { success: true, alreadyCheckedIn: true, message: data.err_msg || '今天已经签到过了' };
+                        }
+                        return { success: false, message: data.err_msg || `API 签到失败 (err_no: ${data.err_no})` };
+                    }
+                    return { success: false, message: `API 签到请求失败 (${response.status})` };
+                } catch (error) {
+                    console.error('API 签到异常:', error);
+                    return { success: false, message: `API 签到异常: ${error.message}` };
+                }
+            }
+        });
+
+        if (results && results[0] && results[0].result) {
+            console.log('✅ API 签到结果:', results[0].result);
+            return results[0].result;
+        }
+
+        return { success: false, message: 'API 签到无响应' };
+    } catch (error) {
+        console.error('❌ API 签到失败:', error);
+        return { success: false, message: `API 签到失败: ${error.message}` };
     }
 }
 
