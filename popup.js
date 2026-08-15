@@ -228,8 +228,8 @@ async function handleManualCheckIn() {
 
             // 刷新统计信息
             setTimeout(async () => {
-                await loadConfig();
-                await updateCheckInStatus();
+                const config = await loadConfig();
+                await updateCheckInStatus(config);
             }, 1000);
         } else {
             updateStatus('error', '签到失败', response.message || '签到操作失败，请重试');
