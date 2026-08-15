@@ -157,10 +157,16 @@ async function performCheckIn(resumeState = null) {
         }
 
         // 【改进】支持页面跳转的签到流程
+        // 重试上限 = 首次尝试 + 配置的重试次数（options 可配 0-3 次）
+        const configuredRetries = config.retryCount;
+        const maxRetries = (Number.isInteger(configuredRetries) && configuredRetries >= 0)
+            ? configuredRetries + 1
+            : DEFAULT_CONFIG.retryCount + 1;
+
         const state = {
             tabId: tab.id,
             config,
-            maxRetries: 10,
+            maxRetries,
             retryCount: 0,
             currentUrl: finalUrl
         };
