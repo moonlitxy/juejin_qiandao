@@ -1,18 +1,17 @@
 // background.js - 后台服务脚本
 // 负责处理定时任务、存储管理和消息通信
 
-// 默认配置（应该与 shared/config.js 保持一致，但因为 Service Worker 无法直接加载 shared 脚本）
-const DEFAULT_CONFIG = {
-    enabled: true,              // 是否启用自动签到
-    checkInTime: '09:00',       // 签到时间（24小时制）
-    lastCheckInDate: null,      // 最后签到日期
-    checkInHistory: [],         // 签到历史记录
-    consecutiveDays: 0,         // 连续签到天数
-    successNotification: true,  // 成功通知开关
-    failureNotification: true,  // 失败通知开关
-    retryCount: 1,              // 重试次数
-    loadTimeout: 30             // 页面加载超时（秒）
-};
+// MV3 的 service worker 支持同步 importScripts，直接复用 shared/config.js 里的
+// DEFAULT_CONFIG，避免与内容脚本 / UI 侧维护两份需要手工同步的配置定义。
+// 路径相对于扩展根目录。
+importScripts('shared/config.js');
+
+// 签到页 URL 识别：签到入口已挪到沸点页（/pins），与 content.js 的
+// isCheckInPageUrl 保持一致，改动时两处同步
+function isCheckInPageUrl(url) {
+    return url.includes('checkin') || url.includes('lottery') ||
+        url.includes('pins') || url.includes('task') || url.includes('signin');
+}
 
 // 插件安装或更新时初始化
 chrome.runtime.onInstalled.addListener(async () => {
@@ -83,12 +82,19 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // 执行签到操作
 // resumeState 为上次重试持久化的状态（service worker 重启后由闹钟恢复）
-async function performCheckIn(resumeState = null) {
+// trigger 为触发来源：'auto' 定时闹钟 / 'manual' 用户手动点击
+// 返回值：签到结果对象 { success, alreadyCheckedIn?, pending?, skipped?, message }
+async function performCheckIn(resumeState = null, trigger = 'auto') {
+    // config 提升到 try 外，异常路径下也能拿到它来决定通知行为
+    let config = null;
+
     try {
         // 恢复重试时直接继续签到尝试
+        // 重试期间不做 enabled / lastCheckInDate 判断：流程已经启动，
+        // 中途改变配置不应把进行中的签到掐断
         if (resumeState) {
-            await runCheckInAttempt(resumeState);
-            return;
+            const resumed = await runCheckInAttempt(resumeState);
+            return resumed || { success: true, pending: true };
         }
 
         // 新的签到流程开始前，清理可能残留的重试闹钟和状态
@@ -97,29 +103,40 @@ async function performCheckIn(resumeState = null) {
 
         // 检查今天是否已经签到
         const today = new Date().toDateString();
-        const { config } = await chrome.storage.local.get(['config']);
+        const storage = await chrome.storage.local.get(['config']);
+        config = storage.config;
 
         // 检查 config 是否存在
         if (!config) {
             console.warn('⚠️ config 不存在，初始化默认配置');
             await chrome.storage.local.set({ config: DEFAULT_CONFIG });
-            return;
+            return { success: false, message: '配置尚未初始化，请重新打开插件后重试' };
+        }
+
+        // 自动签到开关：只拦截定时任务。手动签到是用户的显式意图，始终放行。
+        if (trigger !== 'manual' && config.enabled === false) {
+            console.log('⏸️ 自动签到已关闭，跳过本次定时任务');
+            return { success: true, skipped: true, message: '自动签到已关闭' };
         }
 
         if (config.lastCheckInDate === today) {
             console.log('✅ 今天已经签到过了');
-            return;
+            return { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' };
         }
 
-        // 打开掘金首页（让 content.js 自动处理跳转到签到页面）
-        console.log('打开掘金首页...');
+        // 打开沸点页（签到入口已挪到 /pins，由 content.js 处理后续签到/跳转）
+        console.log('打开掘金沸点页...');
         const tab = await chrome.tabs.create({
-            url: 'https://juejin.cn',
+            url: 'https://juejin.cn/pins',
             active: false
         });
 
-        // 等待首页加载完成
-        await waitForTabLoaded(tab.id, 30000);
+        // 等待首页加载完成（超时取 config.loadTimeout 秒，非法值回退默认）
+        const timeoutSeconds = (Number.isInteger(config.loadTimeout) && config.loadTimeout > 0)
+            ? config.loadTimeout
+            : DEFAULT_CONFIG.loadTimeout;
+        console.log(`⏱️ 页面加载超时: ${timeoutSeconds}秒`);
+        await waitForTabLoaded(tab.id, timeoutSeconds * 1000);
 
         // 等待 content script 注入和初始化完成（增加等待时间）
         console.log('等待 content script 注入和页面渲染...');
@@ -133,12 +150,12 @@ async function performCheckIn(resumeState = null) {
         console.log('当前 URL:', initialUrl);
 
         // 如果还在首页，等待页面可能自动跳转到签到页面（最多5秒）
-        if (!initialUrl.includes('checkin') && !initialUrl.includes('lottery')) {
+        if (!isCheckInPageUrl(initialUrl)) {
             console.log('仍在首页，等待可能的自动跳转...');
             for (let i = 0; i < 5; i++) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 currentTab = await chrome.tabs.get(tab.id);
-                if (currentTab.url && (currentTab.url.includes('checkin') || currentTab.url.includes('lottery'))) {
+                if (currentTab.url && isCheckInPageUrl(currentTab.url)) {
                     console.log('检测到页面已跳转到签到页面:', currentTab.url);
                     break;
                 }
@@ -151,7 +168,7 @@ async function performCheckIn(resumeState = null) {
         console.log('最终 URL:', finalUrl);
 
         // 检查是否已经在签到页面，直接执行签到
-        if (finalUrl && (finalUrl.includes('checkin') || finalUrl.includes('lottery'))) {
+        if (finalUrl && isCheckInPageUrl(finalUrl)) {
             console.log('已在签到页面，等待页面加载完成后执行签到');
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
@@ -172,15 +189,19 @@ async function performCheckIn(resumeState = null) {
         };
 
         // 首次尝试发送消息
-        await runCheckInAttempt(state);
+        // runCheckInAttempt 返回 null 表示已转入重试，结果由后续尝试决定
+        const attemptResult = await runCheckInAttempt(state);
+        return attemptResult || { success: true, pending: true, message: '签到进行中，稍后重试' };
 
     } catch (error) {
         console.error('签到过程出错:', error);
-        showNotification('签到出错', error.message);
+        // config 可能为 null（错误发生在读取配置之前），此时通知按默认行为显示
+        return finalizeCheckInFailure(error.message || '签到过程出错', config);
     }
 }
 
 // 执行一次签到尝试；需要重试时通过 alarms 调度下一次（MV3 下比 setTimeout 更可靠）
+// 返回值：签到终态 result 对象；null 表示已转入重试，结果由后续尝试决定
 async function runCheckInAttempt(state) {
     const { tabId, config } = state;
     console.log(`📤 尝试发送签到消息 (${state.retryCount + 1}/${state.maxRetries})...`);
@@ -202,25 +223,27 @@ async function runCheckInAttempt(state) {
 
         if (state.retryCount < state.maxRetries) {
             await scheduleCheckInRetry(state);
-            return;
+            return null;
         }
 
         // 即使 content script 始终未就绪，也要先通过 API 验证签到状态，
         // 因为首次点击可能已经触发签到成功
         const apiResult = await verifyCheckInViaApi(tabId);
-        if (await finalizeIfApiVerified(apiResult, config, tabId)) {
-            return;
+        const verified = await finalizeIfApiVerified(apiResult, config, tabId);
+        if (verified) {
+            return verified;
         }
 
         // API 验证未确认已签到，尝试通过 API 直接签到
         const apiCheckResult = await attemptCheckInViaApi(tabId);
-        if (await finalizeIfApiVerified(apiCheckResult, config, tabId)) {
-            return;
+        const verifiedAfterCheck = await finalizeIfApiVerified(apiCheckResult, config, tabId);
+        if (verifiedAfterCheck) {
+            return verifiedAfterCheck;
         }
 
-        showNotification('签到失败', apiCheckResult.message || apiResult.message || '页面脚本未就绪，请刷新插件后重试');
-        chrome.tabs.remove(tabId);
-        return;
+        return finalizeCheckInFailure(
+            apiCheckResult.message || apiResult.message || '页面脚本未就绪，请刷新插件后重试',
+            config, tabId);
     }
 
     // content script 已就绪，发送签到消息
@@ -241,7 +264,7 @@ async function runCheckInAttempt(state) {
             console.log('🔄 页面跳转后的 URL:', state.currentUrl);
 
             // 如果在签到页面，等待更长时间确保 API 请求完成
-            if (state.currentUrl && (state.currentUrl.includes('checkin') || state.currentUrl.includes('lottery'))) {
+            if (state.currentUrl && isCheckInPageUrl(state.currentUrl)) {
                 console.log('✅ 在签到页面，等待 API 请求完成...');
                 await new Promise(resolve => setTimeout(resolve, 5000));
             }
@@ -251,14 +274,16 @@ async function runCheckInAttempt(state) {
 
         // 通过 API 验证签到状态（通道关闭往往意味着签到已触发）
         const apiResult = await verifyCheckInViaApi(tabId);
-        if (await finalizeIfApiVerified(apiResult, config, tabId)) {
-            return;
+        const verified = await finalizeIfApiVerified(apiResult, config, tabId);
+        if (verified) {
+            return verified;
         }
 
         // API 验证未确认已签到，尝试通过 API 直接签到
         const apiCheckResult = await attemptCheckInViaApi(tabId);
-        if (await finalizeIfApiVerified(apiCheckResult, config, tabId)) {
-            return;
+        const verifiedAfterCheck = await finalizeIfApiVerified(apiCheckResult, config, tabId);
+        if (verifiedAfterCheck) {
+            return verifiedAfterCheck;
         }
 
         // 仍未确认，走重试流程
@@ -266,13 +291,13 @@ async function runCheckInAttempt(state) {
         state.retryCount++;
         if (state.retryCount < state.maxRetries) {
             await scheduleCheckInRetry(state);
-            return;
+            return null;
         }
 
         // 重试已耗尽，最后一次 API 验证刚刚已执行，确认失败
-        showNotification('签到失败', apiCheckResult.message || apiResult.message || '无法确认签到状态，请手动检查');
-        chrome.tabs.remove(tabId);
-        return;
+        return finalizeCheckInFailure(
+            apiCheckResult.message || apiResult.message || '无法确认签到状态，请手动检查',
+            config, tabId);
     }
 
     console.log('✅ 收到 content script 响应:', response);
@@ -291,20 +316,26 @@ async function runCheckInAttempt(state) {
         // 重新尝试发送签到消息
         state.retryCount++;
         await scheduleCheckInRetry(state, 1000);
-        return;
+        return null;
     }
 
     // 处理签到结果（包括重复签到的情况）
+    let result;
     if (response && (response.success || response.alreadyCheckedIn)) {
-        await finalizeCheckInSuccess(response, config);
+        result = await finalizeCheckInSuccess(response, config);
     } else {
-        showNotification('签到失败', response?.message || '签到操作失败，请手动检查');
+        result = finalizeCheckInFailure(
+            response?.message || '签到操作失败，请手动检查', config);
     }
 
     // 延迟关闭标签页（给用户看结果的时间）
+    // 注意：MV3 下 service worker 可能在此期间休眠导致 setTimeout 丢失，
+    // 标签页会残留。这里仅是"让结果可见"的尽力而为，不影响签到正确性。
     setTimeout(() => {
         chrome.tabs.remove(tabId);
     }, 3000);
+
+    return result;
 }
 
 // 调度下一次签到重试（状态持久化到 storage.session，闹钟触发后由 service worker 恢复）
@@ -328,33 +359,41 @@ async function testContentScriptReady(tabId) {
     return false;
 }
 
-// 签到成功统一处理：更新历史、展示通知、广播给 popup
+// 签到成功统一处理：更新历史、展示通知、广播给 popup，并返回结果
 async function finalizeCheckInSuccess(result, config) {
     // 传递已读取的 config，避免重复读取存储
     await updateCheckInHistory(result, config);
     const message = result.alreadyCheckedIn ?
         (result.message || '今天已经签到过了') :
         (result.message || '掘金签到完成！');
-    showNotification('签到成功', message);
+    notifySuccess(message, config);
+    broadcastCheckInResult(result);
 
-    // 通知 popup 更新状态（popup 可能没有打开，忽略错误）
-    chrome.runtime.sendMessage({
-        action: 'checkInCompleted',
-        result: result
-    }).catch(() => {
-        console.log('通知popup更新状态失败，popup可能未打开');
-    });
+    // 回传结果，供 performCheckIn / manualCheckIn 使用
+    return { ...result, success: true, message };
+}
+
+// 签到失败统一处理：通知、广播、关闭标签页，并返回结果
+function finalizeCheckInFailure(message, config, tabId) {
+    const result = { success: false, message: message };
+    notifyFailure(message, config);
+    broadcastCheckInResult(result);
+    if (typeof tabId === 'number') {
+        chrome.tabs.remove(tabId);
+    }
+    return result;
 }
 
 // API 结果确认已签到时的统一处理：更新历史、通知、关闭标签页
+// 返回签到结果对象；未确认时返回 null
 async function finalizeIfApiVerified(apiResult, config, tabId) {
     if (apiResult.success || apiResult.alreadyCheckedIn) {
         console.log('✅ API 确认：签到已成功！');
-        await finalizeCheckInSuccess(apiResult, config);
+        const result = await finalizeCheckInSuccess(apiResult, config);
         chrome.tabs.remove(tabId);
-        return true;
+        return result;
     }
-    return false;
+    return null;
 }
 
 // 通过 API 验证签到状态（用于消息通道关闭后的备用验证）
@@ -590,7 +629,7 @@ async function updateCheckInHistory(result, config = null) {
     }
 }
 
-// 显示桌面通知
+// 显示桌面通知（底层实现，不检查开关）
 function showNotification(title, message) {
     chrome.notifications.create({
         type: 'basic',
@@ -600,12 +639,44 @@ function showNotification(title, message) {
     });
 }
 
+// 把签到终态广播给 popup（popup 可能未打开，忽略错误）
+// 成功和失败都会广播，popup 据此刷新 UI，不再依赖 manualCheckIn 的单次响应
+function broadcastCheckInResult(result) {
+    chrome.runtime.sendMessage({
+        action: 'checkInCompleted',
+        result: result
+    }).catch(() => {
+        console.log('通知popup更新状态失败，popup可能未打开');
+    });
+}
+
+// 成功通知：受 config.successNotification 开关控制
+// config 为 null 时（异常路径拿不到配置）默认显示，避免漏报
+function notifySuccess(message, config) {
+    if (config && config.successNotification === false) {
+        console.log('🔕 成功通知已关闭，跳过桌面通知');
+        return;
+    }
+    showNotification('签到成功', message);
+}
+
+// 失败通知：受 config.failureNotification 开关控制
+function notifyFailure(message, config) {
+    if (config && config.failureNotification === false) {
+        console.log('🔕 失败通知已关闭，跳过桌面通知');
+        return;
+    }
+    showNotification('签到失败', message);
+}
+
 // 监听消息通信（来自popup或content script）
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'manualCheckIn') {
-        // 手动触发签到
-        performCheckIn().then(() => {
-            sendResponse({ success: true });
+        // 手动触发签到：trigger 传 'manual'，即使 enabled 关闭也放行
+        // 回传真实结果；结果为 pending 时表示已转入重试，popup 需等待
+        // checkInCompleted 广播才知道最终成败
+        performCheckIn(null, 'manual').then(result => {
+            sendResponse(result || { success: true, pending: true });
         }).catch(error => {
             sendResponse({ success: false, message: error.message });
         });
@@ -621,10 +692,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'updateConfig') {
-        // 更新配置
-        chrome.storage.local.set({ config: request.config }, () => {
-            setupDailyAlarm(); // 重新设置闹钟
-            sendResponse({ success: true });
+        // 合并配置后再写入：调用方可能只提交部分字段
+        // （options.js 的 saveConfig 只提交表单里的 6 项），若直接整体覆盖
+        // 会抹掉 lastCheckInDate / checkInHistory / consecutiveDays。
+        chrome.storage.local.get(['config'], (result) => {
+            const mergedConfig = {
+                ...DEFAULT_CONFIG,
+                ...(result.config || {}),
+                ...(request.config || {})
+            };
+
+            chrome.storage.local.set({ config: mergedConfig }, () => {
+                setupDailyAlarm(); // 重新设置闹钟
+                sendResponse({ success: true });
+            });
         });
         return true;
     }

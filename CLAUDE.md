@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **用户指南**: [docs/QUICKSTART.md](docs/QUICKSTART.md)
 - **文档索引**: [docs/README.md](docs/README.md)
 
-**没有 lint / typecheck / build 步骤**，无测试（package.json 的 `test` 脚本是空壳）。验证方式是 `chrome://extensions` 开发者模式下 Load unpacked 加载本目录。
+**没有 lint / typecheck / build 步骤**。测试用 `npm test`（约 6 秒，无第三方依赖）：以 vm 沙箱 + 假 DOM/fetch 跑 `content.js`，断言签到验证链最坏耗时 ≤ 8 秒；`npm run test:ab` 对比 git HEAD 旧版本。改动 `content.js` 的等待/轮询逻辑后必须跑。真实验证仍需 `chrome://extensions` 开发者模式下 Load unpacked 加载本目录。
 
 ## 项目架构
 
@@ -46,16 +46,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 shared/
   ├── config.js        # DEFAULT_CONFIG, CONFIG_KEYS
-  ├── messaging.js     # sendMessage, sendTabMessage
-  └── notification.js  # showDesktopNotification, showPageNotification(+便捷方法)
+  ├── messaging.js     # sendMessage
+  └── notification.js  # showPageNotification(+便捷方法 showSuccess/showError/showInfo)
 ```
 
-无模块化、无 bundle，靠 manifest `content_scripts` 与 HTML `<script>` 标签按顺序注入，用全局变量通信。**各脚本的可用范围不同**：
+无模块化、无 bundle，靠 manifest `content_scripts`、HTML `<script>` 标签、以及 service worker 的 `importScripts` 三种方式加载，用全局变量通信。**各脚本的可用范围不同**：
 
-- `shared/config.js`：注入 content_scripts（manifest.json），并被 popup/options 的 HTML 引入。
+- `shared/config.js`：注入 content_scripts（manifest.json）、被 popup/options 的 HTML 引入，并由 **background.js 通过 `importScripts('shared/config.js')` 加载**（MV3 的 service worker 支持同步 importScripts）。
 - `shared/messaging.js`、`shared/notification.js`：**仅** popup/options 的 HTML 引入。
-- **background.js 不加载任何 shared 脚本**（service worker），因此在 [background.js:4-15](background.js#L4-L15) 自行重声明 `DEFAULT_CONFIG`。修改 config 字段时需同步两处。
-- 注意 `sendTabMessage` / `showDesktopNotification` / `CONFIG_KEYS` 目前无调用方（background 无法引用 shared 脚本），改 shared 脚本时不要假设它们被使用。
+- 全仓库**只有一份** `DEFAULT_CONFIG` 定义（在 `shared/config.js`）。新增配置字段只改这一处，并同步 `CONFIG_KEYS` 与所有读写点。
+- `CONFIG_KEYS` 目前无调用方，但它是配置字段的键名清单，改字段时仍需同步维护。
 
 ### 文件职责
 
@@ -105,6 +105,19 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 **needRedirect 协议**：content.js 在首页发现"去签到"链接且无法在当前页完成时，返回 `{ success: false, needRedirect: true, redirectUrl }`，由 background 用 `chrome.tabs.update` 跳转后重试，而不是 content 自己跳转（避免页面上下文销毁）。
 
+**manualCheckIn 返回协议**：background 回传真实签到结果，不再无条件返回 `{ success: true }`：
+
+```javascript
+{ success: true, alreadyCheckedIn: true, message: '今天已经签到过了' }  // 今日已签到
+{ success: true, pending: true, message: '...' }                       // 已转入重试，结果待定
+{ success: true, skipped: true, message: '自动签到已关闭' }              // 定时触发但开关关闭
+{ success: false, message: '...' }                                     // 明确失败
+```
+
+`pending` 表示后台已把签到转入 alarms 重试，popup 需保持"签到中..."并等待 `checkInCompleted` 广播（带 90 秒超时兜底）。**失败同样会广播** `checkInCompleted`，所以 UI 以广播为准刷新状态，而不是以 `manualCheckIn` 的单次响应定生死。
+
+**updateConfig 合并语义**：background 收到 `updateConfig` 时先读取已存配置再合并（`{ ...DEFAULT_CONFIG, ...已存配置, ...传入字段 }`），因此调用方可以只提交部分字段。这点很关键——options.js 的 `saveConfig()` 只提交表单里的 6 项，若整体覆盖会抹掉 `lastCheckInDate` / `checkInHistory` / `consecutiveDays`。
+
 ### 4. 重复签到检测
 
 针对多设备场景，使用多重检测机制：
@@ -120,7 +133,7 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 签到链路包含两条相互独立的 API 降级路径（都要登录态，靠 `credentials: 'include'` 携带 cookie）：
 
-- **content.js 侧**：UI 验证全部失败后调用 `attemptAPICheckIn()` 直接 POST 签到。
+- **content.js 侧**：验证预算（`VERIFY_BUDGET_MS`）内未确认签到后，调用 `attemptAPICheckIn()` 直接 POST 签到。
 - **background.js 侧**（[background.js](background.js)）：content script 消息通道因页面跳转/刷新关闭时（`sendMessage` 抛错），先 `verifyCheckInViaApi()` 查询今日状态确认，未确认再 `attemptCheckInViaApi()` 直接签到——两者都通过 `chrome.scripting.executeScript` 注入 fetch。**消息通道关闭不等于失败**，一律先 API 验证。
 
 **重试机制跨 service worker 生命周期**：MV3 下 service worker 可能被随时终止，因此 `scheduleCheckInRetry()` 把 state（tabId/config/重试计数）持久化到 `chrome.storage.session`，再创建 `checkInRetry` 闹钟；闹钟触发时从 session 恢复 state 继续，用完即删。重试上限由 `config.retryCount` 驱动（options 可选 0-3 次）：`maxRetries = retryCount + 1`（含首次尝试），字段缺失或非法时回退默认 1 次重试。
@@ -129,22 +142,56 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 - `GET https://api.juejin.cn/growth_api/v2/get_today_status` — `today_status === 1` 或 `has_check_in === true` 表示已签到
 - `POST https://api.juejin.cn/growth_api/v1/check_in` — `err_no === 0` 成功；`err_no === 10001` 或 `err_msg` 含"重复"/"已经"为重复签到
 
-### 6. 数据存储结构
+### 6. 验证链的时间预算（关键约束）
 
-`chrome.storage.local` 存 `config` 对象（结构见 [shared/config.js](shared/config.js)，与 background.js 顶部重复定义）：
+MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content script 的响应依赖 background 的消息通道。验证链一旦逼近这条红线，通道常被中途销毁，迫使 background 走那条复杂的 API 降级路径 —— 也就是说，**验证链过长才是那堆降级逻辑的真正病根**。
+
+因此 content.js 顶部集中声明了时间预算常量，所有等待都受其约束（改等待时间请改常量，不要在函数里塞魔数）：
+
+| 常量 | 值 | 作用 |
+|---|---|---|
+| `PAGE_READY_SETTLE_MS` | 500 | readyState 完成后的额外渲染等待 |
+| `PAGE_READY_TIMEOUT_MS` | 3000 | 等待 load 事件的兜底上限（防永久挂起） |
+| `CLICK_SETTLE_MS` | 600 | 点击后给签到请求发起的时间 |
+| `CLAIM_BUTTON_BUDGET_MS` | 1200 | 等待"领取矿石"按钮的预算（可选步骤） |
+| `VERIFY_BUDGET_MS` | 4500 | 签到结果验证总预算 |
+| `VERIFY_INTERVAL_MS` | 700 | 每轮验证间隔 |
+| `VERIFY_API_EVERY` | 2 | 每 N 轮才调一次状态 API |
+
+验证流程为 `pollCheckInResult()` 轮询：每轮先做零成本的 `checkDomCheckInSignals()`（按钮文本 / 页面 toast / 重复签到文案），每隔 N 轮才调一次较慢的状态 API；**任一信号确认成功立即返回**。预算耗尽后再用 API 做最后一次确认，仍失败才交给 `attemptAPICheckIn()` 兜底。
+
+实测（假 DOM/fetch 沙箱跑 `performActualCheckIn` 的端到端耗时，与 git HEAD 旧版对比）：
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 快速成功（按钮立刻变"已签到"） | 8510ms | 2309ms |
+| 慢速成功（API 2.5 秒后确认） | 10509ms | 3709ms |
+| UI 未确认 + API 兜底成功 | 25267ms | 6113ms |
+| 最坏情况（UI 未确认 + 兜底也失败） | 25268ms | 6107ms |
+| 网络很慢（API 往返 1.5 秒） | 13010ms | 3304ms |
+| 极晚确认（API 6 秒后才反映） | 10509ms | 6106ms |
+| 重复签到（页面提示已签到） | 8508ms | 2307ms |
+
+最坏耗时从 **25.3 秒压到 6.1 秒（-76%）**，成功路径普遍落在 2-4 秒。成功率未回退：即使 API 在验证预算之外才反映签到，兜底的 `attemptAPICheckIn()` 仍会命中 `err_no: 10001`（重复签到）并返回成功。
+
+**调预算时不要只图快**：`VERIFY_BUDGET_MS` 调小会更快，但可能把慢签到误判为失败；兜底虽能救，却多一次写请求。改完请实测最坏耗时。
+
+### 7. 数据存储结构
+
+`chrome.storage.local` 存 `config` 对象（唯一定义见 [shared/config.js](shared/config.js)，background.js 通过 `importScripts` 复用同一份）：
 
 ```javascript
 {
     config: {
-        enabled: true,              // 是否启用自动签到
-        checkInTime: '09:00',       // 签到时间
+        enabled: true,              // 自动签到开关（只拦截定时触发，手动签到始终放行）
+        checkInTime: '09:00',       // 签到时间（变更时重设 dailyCheckIn 闹钟）
         lastCheckInDate: null,      // 最后签到日期（用于判断今日是否已签到）
         checkInHistory: [],         // 签到历史记录（最近30天）
         consecutiveDays: 0,         // 连续签到天数
-        successNotification: true,  // 成功通知开关
-        failureNotification: true,  // 失败通知开关
-        retryCount: 1,              // 重试次数
-        loadTimeout: 30             // 页面加载超时（秒）
+        successNotification: true,  // 成功桌面通知开关（background notifySuccess 消费）
+        failureNotification: true,  // 失败桌面通知开关（background notifyFailure 消费）
+        retryCount: 1,              // 重试次数（maxRetries = retryCount + 1）
+        loadTimeout: 30             // 页面加载超时（秒，waitForTabLoaded 消费）
     }
 }
 ```
@@ -171,7 +218,7 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
    ↓
 5. 发送 checkIn 消息给 content.js 执行签到
    ↓
-6. content.js 查找并点击签到按钮，多轮验证结果
+6. content.js 查找并点击签到按钮，在时间预算内轮询验证结果（见「验证链的时间预算」）
    ↓
 7. 通道关闭/失败时走 API 降级（先验证后直签）
    ↓
@@ -202,8 +249,10 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 1. **合并存储读取** - 传递 config 参数避免重复读取（`performCheckIn`、`loadConfig` 均返回/下发 config）
 2. **事件监听替代轮询** - `waitForTabLoaded` 使用 chrome.tabs.onUpdated 而非轮询
-3. **缓存 DOM 查询** - `checkAfterCheckInStatus` 接收已找到的按钮元素避免重复查找
-4. **修复内存泄漏** - `waitForElement` 的 MutationObserver 用完立即 `disconnect()`，并带超时清理
+3. **缓存 DOM 查询** - `checkDomCheckInSignals` 接收已找到的按钮元素避免重复查找（元素失效时按 `isConnected` 判定并重新查找）
+4. **配置写入改为合并** - `updateConfig` 先读取已存配置再合并，调用方可只提交部分字段，避免每次保存设置都抹除签到历史
+5. **验证链改为时间预算轮询** - `pollCheckInResult` 在固定预算内轮询，确认成功立即返回，取代原先「3 轮固定等待 2s/4s/6s」的串行结构；DOM 信号零成本每轮都采，较慢的状态 API 按 `VERIFY_API_EVERY` 节流
+6. **复用上游状态查询** - `performActualCheckIn(statusKnown)` 接收调用方刚查到的签到状态，非 null 时跳过自身的重复 API 查询
 
 ### 性能提升数据
 
@@ -227,7 +276,8 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 ### 调整通知设置
 
-- 桌面通知: [background.js](background.js) - `showNotification()`
+- 桌面通知底层实现: [background.js](background.js) - `showNotification()`（不检查开关）
+- 受开关控制的通知入口: [background.js](background.js) - `notifySuccess()` / `notifyFailure()`，分别读 `config.successNotification` / `config.failureNotification`
 - 页面通知: [shared/notification.js](shared/notification.js) - `showPageNotification()`
 
 ### 更新 UI 样式

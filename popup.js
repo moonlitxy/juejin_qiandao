@@ -16,6 +16,15 @@ const elements = {
     optionsBtn: null
 };
 
+// 手动签到等待状态：background 可能把签到转入重试（pending），
+// 最终结果由 checkInCompleted 广播送达，期间按钮保持"签到中..."
+let manualCheckInWaiting = false;
+let manualCheckInTimeoutId = null;
+
+// 等待广播的超时兜底（毫秒）。签到链路含重试可能持续数十秒，
+// 超时后恢复按钮，避免永远卡在"签到中..."
+const MANUAL_CHECKIN_TIMEOUT = 90000;
+
 // 初始化
 document.addEventListener('DOMContentLoaded', async () => {
     // 获取DOM元素
@@ -41,9 +50,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateCheckInStatus(config);
 
     // 监听来自background的消息（签到完成后更新状态）
+    // background 现在成功和失败都会广播 checkInCompleted，UI 以它为准
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'checkInCompleted') {
-            console.log('收到签到完成通知，刷新状态');
+            console.log('收到签到完成通知，刷新状态:', request.result);
+
+            // 手动签到正在等最终结果，先定案（按钮与提示）
+            if (manualCheckInWaiting) {
+                finishManualCheckIn(request.result);
+            }
+
+            // 再统一刷新状态区与统计
             loadConfig().then(config => {
                 updateCheckInStatus(config);
             });
@@ -222,27 +239,56 @@ async function handleManualCheckIn() {
         // 发送签到请求
         const response = await sendMessage({ action: 'manualCheckIn' });
 
-        if (response.success) {
-            updateStatus('success', '签到成功', '恭喜你完成今日签到');
-            elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">✓</span><span>已完成</span>';
-
-            // 刷新统计信息
-            setTimeout(async () => {
-                const config = await loadConfig();
-                await updateCheckInStatus(config);
-            }, 1000);
-        } else {
-            updateStatus('error', '签到失败', response.message || '签到操作失败，请重试');
-            elements.manualCheckInBtn.disabled = false;
-            elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">📝</span><span>立即签到</span>';
+        // pending：background 已把签到转入重试，最终结果由 checkInCompleted 广播送达
+        if (response && response.pending) {
+            console.log('签到已转入重试，等待最终结果广播...');
+            manualCheckInWaiting = true;
+            manualCheckInTimeoutId = setTimeout(() => {
+                manualCheckInWaiting = false;
+                manualCheckInTimeoutId = null;
+                elements.manualCheckInBtn.disabled = false;
+                elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">📝</span><span>立即签到</span>';
+                showError('签到结果未确认，请留意桌面通知');
+            }, MANUAL_CHECKIN_TIMEOUT);
+            return;
         }
+
+        // 非 pending：结果已确定，直接定案
+        finishManualCheckIn(response);
 
     } catch (error) {
         console.error('手动签到失败:', error);
-        updateStatus('error', '签到出错', error.message || '签到过程出现错误');
+        resetManualCheckInWaiting();
         elements.manualCheckInBtn.disabled = false;
         elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">📝</span><span>立即签到</span>';
+        showError(error.message || '签到过程出现错误');
     }
+}
+
+// 清理手动签到的等待状态与超时定时器
+function resetManualCheckInWaiting() {
+    manualCheckInWaiting = false;
+    if (manualCheckInTimeoutId) {
+        clearTimeout(manualCheckInTimeoutId);
+        manualCheckInTimeoutId = null;
+    }
+}
+
+// 手动签到定案：成功保持完成态，失败恢复按钮并用页面内通知告知原因
+// 状态区与按钮文案统一交给 updateCheckInStatus 依据 config 刷新，此处不直接改状态文字
+function finishManualCheckIn(result) {
+    resetManualCheckInWaiting();
+
+    const ok = result && (result.success || result.alreadyCheckedIn);
+
+    if (!ok) {
+        elements.manualCheckInBtn.disabled = false;
+        elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">📝</span><span>立即签到</span>';
+        showError((result && result.message) || '签到失败，请重试');
+        return;
+    }
+
+    showSuccess(result.message || '签到成功');
 }
 
 // 更新配置

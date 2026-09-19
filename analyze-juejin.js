@@ -107,9 +107,9 @@ async function analyzeJuejinCheckIn() {
     });
 
     try {
-        // ========== 步骤 1: 打开掘金首页 ==========
-        log('\n📍 步骤 1: 打开掘金首页');
-        await page.goto('https://juejin.cn', { waitUntil: 'networkidle' });
+        // ========== 步骤 1: 打开掘金沸点页（签到入口所在页） ==========
+        log('\n📍 步骤 1: 打开掘金沸点页');
+        await page.goto('https://juejin.cn/pins', { waitUntil: 'networkidle' });
         await page.waitForTimeout(3000);
         await saveScreenshot(page, '01-homepage');
 
@@ -218,7 +218,7 @@ async function analyzeJuejinCheckIn() {
             log(`🔗 当前页面 URL: ${currentUrl}`);
 
             // ========== 步骤 4: 在签到页面查找签到按钮 ==========
-            if (currentUrl.includes('task') || currentUrl.includes('checkin') || currentUrl.includes('签到')) {
+            if (currentUrl.includes('task') || currentUrl.includes('checkin') || currentUrl.includes('pins') || currentUrl.includes('签到')) {
                 log('\n📍 步骤 4: 已进入签到页面');
 
                 await page.waitForTimeout(2000);

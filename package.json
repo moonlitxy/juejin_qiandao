@@ -4,7 +4,8 @@
     "description": "掘金自动签到浏览器插件",
     "main": "background.js",
     "scripts": {
-        "test": "echo \"暂无测试\" && exit 0"
+        "test": "node tests/simulate-checkin-timing.js",
+        "test:ab": "AB=1 node tests/simulate-checkin-timing.js"
     },
     "keywords": [
         "juejin",

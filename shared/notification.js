@@ -1,22 +1,6 @@
 // shared/notification.js - 统一的通知系统
 
 /**
- * 显示桌面通知（在 background.js 中使用）
- *
- * @param {string} title - 通知标题
- * @param {string} message - 通知内容
- * @param {string} iconUrl - 图标URL（可选）
- */
-function showDesktopNotification(title, message, iconUrl = null) {
-    chrome.notifications.create({
-        type: 'basic',
-        iconUrl: iconUrl || 'icons/icon48.png',
-        title: title,
-        message: message
-    });
-}
-
-/**
  * 显示页面内通知（在 popup.js 和 options.js 中使用）
  * 带动画效果的通知，自动在3秒后消失
  *

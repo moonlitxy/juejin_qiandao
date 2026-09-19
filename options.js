@@ -109,14 +109,15 @@ async function saveConfig() {
             loadTimeout: parseInt(elements.loadTimeout.value)
         };
 
-        // 发送到background
+        // 发送到background（只提交表单字段，background 会与已存配置合并）
         await sendMessage({
             action: 'updateConfig',
             config: newConfig
         });
 
-        // 更新当前配置
-        currentConfig = newConfig;
+        // 更新当前配置：合并而非替换，保留不在表单里的字段
+        // （lastCheckInDate / checkInHistory / consecutiveDays）
+        currentConfig = { ...currentConfig, ...newConfig };
 
         showPageNotification('设置已保存', 'success');
 
@@ -135,8 +136,8 @@ async function resetConfig() {
             config: DEFAULT_CONFIG
         });
 
-        // 更新当前配置
-        currentConfig = { ...DEFAULT_CONFIG };
+        // 更新当前配置：只重置设置项，保留签到历史等运行时字段
+        currentConfig = { ...currentConfig, ...DEFAULT_CONFIG };
 
         // 更新UI
         elements.enabledToggle.checked = DEFAULT_CONFIG.enabled;

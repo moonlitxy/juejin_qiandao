@@ -3,6 +3,27 @@
 
 console.log('掘金签到脚本已注入');
 
+// ===== 时间预算 =====
+// MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content script 的响应
+// 依赖 background 的消息通道。验证链一旦逼近这条红线，通道经常被中途销毁，
+// 迫使 background 走那条复杂的 API 降级路径。
+// 因此这里用「固定时间预算 + 轮询」取代原先「3 轮固定等待 2/4/6 秒」的串行结构：
+// 确认成功立刻返回，不再傻等；预算耗尽才判定未确认。
+const PAGE_READY_SETTLE_MS = 500;     // 页面 readyState 完成后的额外渲染等待
+const PAGE_READY_TIMEOUT_MS = 3000;   // 等待 load 事件的兜底上限
+const CLICK_SETTLE_MS = 600;          // 点击后给签到请求发起的时间
+const CLAIM_BUTTON_BUDGET_MS = 1200;  // 等待"领取矿石"按钮出现的预算（可选步骤）
+const VERIFY_BUDGET_MS = 4500;        // 签到结果验证总预算
+const VERIFY_INTERVAL_MS = 700;       // 每轮验证的间隔
+const VERIFY_API_EVERY = 2;           // 每 N 轮才调一次状态 API（API 较慢，避免频繁请求）
+
+// 签到页 URL 识别：签到入口已挪到沸点页（/pins），签到不再只发生在
+// checkin/lottery 页，pins（及 task/sigin 相关页）同样视为可直接执行签到的页面
+function isCheckInPageUrl(url) {
+    return url.includes('checkin') || url.includes('lottery') ||
+        url.includes('pins') || url.includes('task') || url.includes('signin');
+}
+
 // 监听来自background的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('📨 收到消息:', request.action);
@@ -55,9 +76,10 @@ async function executeCheckIn() {
         }
 
         // 如果已经在签到页面，直接执行签到
-        if (currentUrl.includes('checkin') || currentUrl.includes('lottery')) {
+        // 传入 false：步骤 0 刚刚确认过今日未签到，下游无需重复查询
+        if (isCheckInPageUrl(currentUrl)) {
             console.log('已在签到页面，直接执行签到');
-            return await performActualCheckIn();
+            return await performActualCheckIn(false);
         }
 
         // 在首页，先检查是否已经签到
@@ -121,7 +143,7 @@ async function executeCheckIn() {
                 for (let i = 0; i < 10; i++) {
                     await delay(1000);
                     const newUrl = window.location.href;
-                    if (newUrl !== currentUrl && (newUrl.includes('checkin') || newUrl.includes('lottery'))) {
+                    if (newUrl !== currentUrl && isCheckInPageUrl(newUrl)) {
                         console.log('✅ 已跳转到签到页面，等待加载...');
                         await delay(3000);
                         console.log('在新页面重新执行签到...');
@@ -137,8 +159,9 @@ async function executeCheckIn() {
         }
 
         // 最后尝试：直接在当前页面查找签到按钮
+        // 传入 false：步骤 0 刚刚确认过今日未签到
         console.log('尝试在当前页面查找签到按钮');
-        return await performActualCheckIn();
+        return await performActualCheckIn(false);
 
     } catch (error) {
         console.error('签到过程出错:', error);
@@ -177,6 +200,10 @@ function findGoToCheckInButton() {
     console.log('开始查找首页"去签到"按钮...');
 
     const selectors = [
+        // 沸点页（/pins）右侧签到卡片：button.signin-btn，无 href，点击后弹签到弹窗
+        '.signin-tip .signin-btn',
+        '.signin-card .signin-btn',
+        'button.signin-btn',
         // 直接签到按钮（按优先级排序）
         'a[href*="signin"]',
         'a[href*="checkin"]',
@@ -217,15 +244,23 @@ function findGoToCheckInButton() {
 }
 
 // 执行实际的签到操作（在签到页面）
-async function performActualCheckIn() {
+// statusKnown: 调用方刚查到的今日签到状态（true/false）；传 null 表示未知，需自行查询
+async function performActualCheckIn(statusKnown = null) {
     console.log('===== 开始执行实际签到操作 =====');
 
     // 等待页面加载完成
     await waitForPageReady();
 
-    // 【步骤 1】先通过 API 检查今日签到状态
+    // 【步骤 1】检查今日签到状态
+    // 调用方若已查过就复用结果，省掉一次网络往返
     console.log('【步骤 1】检查今日签到状态...');
-    const alreadyChecked = await checkTodayCheckInStatus();
+    let alreadyChecked;
+    if (statusKnown !== null) {
+        alreadyChecked = statusKnown;
+        console.log(`ℹ️ 复用调用方已查询的状态: ${statusKnown ? '已签到' : '未签到'}`);
+    } else {
+        alreadyChecked = await checkTodayCheckInStatus();
+    }
     if (alreadyChecked) {
         console.log('✅ 今日已签到，无需重复签到');
         return {
@@ -264,6 +299,19 @@ async function performActualCheckIn() {
             };
         }
 
+        // 【降级】页面结构变化导致找不到按钮时，直接用 API 签到兜底
+        // （签到入口曾从 checkin 页挪到 /pins，DOM 先失效但 API 通常可用）
+        console.log('🔧 未找到按钮，尝试 API 直接签到兜底...');
+        const apiFallback = await attemptAPICheckIn();
+        if (apiFallback.success || apiFallback.alreadyCheckedIn) {
+            console.log('✅ API 兜底签到成功！');
+            return {
+                success: true,
+                message: apiFallback.message || '签到成功（API 方式）',
+                ...(apiFallback.alreadyCheckedIn ? { alreadyCheckedIn: true } : {})
+            };
+        }
+
         return {
             success: false,
             message: '未找到签到按钮，可能页面结构已变化'
@@ -298,57 +346,62 @@ async function performActualCheckIn() {
     console.log('  - 按钮禁用:', buttonDisabled);
     console.log('  - 按钮可见:', checkInButton.offsetParent !== null);
 
-    // 尝试监听网络请求（如果有）
-    let networkRequests = [];
+    // 临时包裹 fetch，仅用于观察签到请求是否被触发
+    const detectedRequests = [];
     const originalFetch = window.fetch;
-    window.fetch = function(...args) {
+    window.fetch = function (...args) {
         console.log('🌐 检测到 fetch 请求:', args[0]);
-        networkRequests.push(args[0]);
+        detectedRequests.push(args[0]);
         return originalFetch.apply(this, args);
     };
 
+    let clicked = false;
     try {
-        checkInButton.click();
-        console.log('✅ 签到按钮点击成功');
-
-        // 等待一小段时间，检查是否有网络请求
-        await delay(1000);
-        if (networkRequests.length > 0) {
-            console.log('📡 检测到网络请求:', networkRequests);
-        } else {
-            console.log('⚠️ 未检测到网络请求，可能点击未生效');
-        }
-    } catch (clickError) {
-        console.error('❌ 按钮点击失败:', clickError);
         try {
+            checkInButton.click();
+            console.log('✅ 签到按钮点击成功');
+            clicked = true;
+        } catch (clickError) {
+            // 有些按钮是被框架包住的，直接 click() 会抛错，退化为原生事件派发
+            console.error('❌ 按钮点击失败，改用 dispatchEvent:', clickError);
             checkInButton.dispatchEvent(new MouseEvent('click', {
                 view: window,
                 bubbles: true,
                 cancelable: true
             }));
             console.log('✅ dispatchEvent 点击完成');
-        } catch (e) {
-            console.error('❌ 所有点击方式都失败:', e);
-            return {
-                success: false,
-                message: '无法点击签到按钮'
-            };
+            clicked = true;
         }
+    } catch (clickError) {
+        console.error('❌ 所有点击方式都失败:', clickError);
+    } finally {
+        // 无论成败都必须还原，否则会永久污染页面的 fetch
+        window.fetch = originalFetch;
     }
 
-    // 恢复原始 fetch
-    window.fetch = originalFetch;
+    if (!clicked) {
+        return {
+            success: false,
+            message: '无法点击签到按钮'
+        };
+    }
 
-    // 【步骤 5】查找并点击"领取矿石"按钮（如果有）
+    // 给签到请求一点发起时间
+    await delay(CLICK_SETTLE_MS);
+    if (detectedRequests.length > 0) {
+        console.log('📡 检测到网络请求:', detectedRequests);
+    } else {
+        console.log('⚠️ 未检测到网络请求，可能点击未生效或页面未走 fetch');
+    }
+
+    // 【步骤 5】领取矿石（可选步骤：出现才点，点到即走，不再固定空等 2 秒）
     console.log('【步骤 5】查找并点击领取矿石按钮...');
-    await delay(2000); // 等待签到请求完成
-    const claimButton = findClaimButton();
+    const claimButton = await waitForClaimButton(CLAIM_BUTTON_BUDGET_MS);
     if (claimButton) {
         console.log('✅ 找到领取矿石按钮，点击领取');
         try {
             claimButton.click();
             console.log('✅ 领取矿石按钮点击成功');
-            await delay(2000);
         } catch (e) {
             console.error('⚠️ 点击领取矿石失败:', e);
         }
@@ -357,34 +410,16 @@ async function performActualCheckIn() {
     }
 
     // 【步骤 6】等待并验证签到结果（核心验证）
+    // 在时间预算内轮询，任一信号确认成功立即返回
     console.log('【步骤 6】验证签到结果...');
-
-    // 多次尝试验证，增加延迟确保 API 请求完成
-    let finalCheck = null;
-    const maxVerifyAttempts = 3;
-
-    for (let attempt = 1; attempt <= maxVerifyAttempts; attempt++) {
-        console.log(`🔍 验证尝试 ${attempt}/${maxVerifyAttempts}...`);
-
-        // 每次尝试等待更长时间
-        const waitTime = attempt * 2000; // 2s, 4s, 6s
-        await delay(waitTime);
-
-        finalCheck = await checkAfterCheckInStatus(checkInButton);
-
-        if (finalCheck.success) {
-            console.log(`✅✅✅ 签到成功！（第 ${attempt} 次验证）`);
-            return {
-                success: true,
-                message: finalCheck.message || '签到成功！'
-            };
-        } else {
-            console.log(`⚠️ 第 ${attempt} 次验证未通过，继续等待...`);
-        }
+    const verifyResult = await pollCheckInResult(checkInButton);
+    if (verifyResult.success) {
+        console.log('✅✅✅ 签到成功！');
+        return verifyResult;
     }
 
-    // 【备用方案】所有验证都失败，尝试使用 API 直接签到
-    console.log('❌ 所有 UI 验证尝试都失败');
+    // 【备用方案】预算内未确认，尝试用 API 直接签到兜底
+    console.log('⚠️ 验证预算内未确认签到成功');
     console.log('🔧 尝试备用方案：API 直接签到...');
 
     const apiResult = await attemptAPICheckIn();
@@ -399,7 +434,7 @@ async function performActualCheckIn() {
     console.log('❌❌❌ UI 验证和 API 签到都失败');
     return {
         success: false,
-        message: finalCheck?.message || '签到操作已执行，但无法确认是否成功，请手动检查'
+        message: verifyResult.message || '签到操作已执行，但无法确认是否成功，请手动检查'
     };
 }
 
@@ -512,21 +547,31 @@ function findCheckInButton() {
 }
 
 // 等待页面准备就绪
+// background 会先等到标签页状态为 complete 才发消息，所以这里通常只需给
+// 动态内容一点渲染时间；load 事件分支是兜底，并带超时防止永久挂起。
 async function waitForPageReady() {
     console.log('等待页面准备就绪...');
 
-    // 等掘金页面完全加载
-    return new Promise((resolve) => {
-        if (document.readyState === 'complete') {
-            console.log('页面已完全加载');
-            setTimeout(resolve, 1000); // 额外等待1秒确保动态内容加载
-        } else {
-            window.addEventListener('load', () => {
-                console.log('页面加载完成事件触发');
-                setTimeout(resolve, 2000); // 等待2秒确保内容加载
-            });
-        }
-    });
+    if (document.readyState !== 'complete') {
+        await new Promise((resolve) => {
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            window.addEventListener('load', done, { once: true });
+            setTimeout(() => {
+                console.log('⚠️ 等待 load 事件超时，继续执行');
+                done();
+            }, PAGE_READY_TIMEOUT_MS);
+        });
+        console.log('页面加载完成事件触发');
+    } else {
+        console.log('页面已完全加载');
+    }
+
+    await delay(PAGE_READY_SETTLE_MS);
 }
 
 // 判断是否已经签到（更严格的判断条件）
@@ -573,57 +618,40 @@ function isAlreadyCheckedIn(buttonText, buttonClasses, buttonDisabled) {
     return false;
 }
 
-// 检查签到后的状态（优先使用 API 验证）
-async function checkAfterCheckInStatus(checkInButton = null) {
-    console.log('===== 开始检查签到后状态 =====');
+// 采集签到后的 DOM 信号（零成本，不发起网络请求）
+// 原先的 checkAfterCheckInStatus 把「等待」和「判断」耦合在一起，每轮验证都要先
+// 空等 2 秒。现在等待交给 pollCheckInResult 按时间预算统一管理，本函数只做一次性
+// 信号采集，因此可以在轮询中被高频调用。
+//
+// @param {HTMLElement|null} checkInButton - 点击前的签到按钮引用
+// @returns {{confirmed: boolean, alreadyCheckedIn?: boolean, message?: string}}
+function checkDomCheckInSignals(checkInButton = null) {
+    // 【信号 1】按钮状态
+    // 页面重渲染会让旧引用失效（isConnected 变 false），失效时按文本重新查找
+    const button = (checkInButton && checkInButton.isConnected) ? checkInButton : findCheckInButton();
 
-    // 等待 API 请求完成
-    await delay(2000);
-
-    // 【验证方式 1】API 验证（最准确，优先使用）
-    console.log('🔍 验证方式 1: 通过 API 检查签到状态...');
-    const apiStatus = await checkTodayCheckInStatus();
-    if (apiStatus) {
-        console.log('✅ API 验证成功：今日已签到');
-        return {
-            success: true,
-            message: '签到成功（API 验证）'
-        };
-    } else {
-        console.log('⚠️ API 返回未签到状态（可能签到失败或 API 延迟）');
-    }
-
-    // 【验证方式 2】按钮状态判断（辅助验证）
-    console.log('🔍 验证方式 2: 检查按钮状态...');
-
-    // 如果没有传入按钮，才重新查找
-    if (!checkInButton) {
-        checkInButton = findCheckInButton();
-    }
-
-    if (checkInButton) {
-        const buttonText = (checkInButton.textContent || '').trim();
-        const buttonDisabled = checkInButton.disabled;
+    if (button) {
+        const buttonText = (button.textContent || '').trim();
 
         console.log('签到后按钮状态:', {
             text: buttonText,
-            disabled: buttonDisabled
+            disabled: button.disabled
         });
 
         // 严格判断：只有明确显示"已签到"才算成功
         if (buttonText.includes('已签到') || buttonText.includes('今日已签到')) {
             console.log('✅ 按钮文本明确显示已签到');
             return {
-                success: true,
+                confirmed: true,
                 message: '签到成功（按钮状态确认）'
             };
         }
 
-        // 如果按钮仍然显示"立即签到"或"去签到"，说明签到失败
+        // 仍然显示"立即签到"或"去签到" → 尚未签到，留给下一轮继续确认
         if (buttonText.includes('立即签到') || buttonText.includes('去签到')) {
             console.log('⚠️ 按钮仍然显示签到按钮，可能签到失败');
             return {
-                success: false,
+                confirmed: false,
                 message: '签到操作已执行，但按钮状态未变化，可能签到失败'
             };
         }
@@ -631,10 +659,7 @@ async function checkAfterCheckInStatus(checkInButton = null) {
         console.log('⚠️ 未找到签到按钮');
     }
 
-    // 【验证方式 3】页面提示信息（作为辅助判断）
-    console.log('🔍 验证方式 3: 检查页面提示信息...');
-
-    // 只检查明确的成功提示
+    // 【信号 2】页面提示信息（toast / modal 等）
     const strongSuccessPatterns = [
         '签到成功',
         '今日已签到',
@@ -664,7 +689,7 @@ async function checkAfterCheckInStatus(checkInButton = null) {
                     if (text.includes(pattern)) {
                         console.log(`✅ 页面提示明确显示: ${pattern}`);
                         return {
-                            success: true,
+                            confirmed: true,
                             message: `签到成功 - ${pattern}`
                         };
                     }
@@ -673,7 +698,7 @@ async function checkAfterCheckInStatus(checkInButton = null) {
         }
     }
 
-    // 【验证方式 4】检查是否提示重复签到
+    // 【信号 3】页面上直接写着已经签过（重复签到）
     const alreadyCheckedPatterns = ['已经签到', '今日已签到', '重复签到', '已经打卡'];
     const bodyText = document.body.textContent || '';
 
@@ -681,19 +706,88 @@ async function checkAfterCheckInStatus(checkInButton = null) {
         if (bodyText.includes(pattern)) {
             console.log(`✅ 检测到重复签到提示: ${pattern}`);
             return {
-                success: true,
+                confirmed: true,
                 alreadyCheckedIn: true,
                 message: '今天已经签到过了'
             };
         }
     }
 
-    // 所有验证都未通过
-    console.log('❌ 所有验证方式都未确认签到成功');
+    // 本轮未采集到任何确认信号
+    return { confirmed: false };
+}
+
+// 在固定时间预算内轮询确认签到结果
+// 每轮先做零成本的 DOM 采集，每隔几轮才调用一次较慢的状态 API；
+// 任一信号确认成功立即返回，不再空等固定时长 —— 这是把验证链从约 22 秒
+// 压到 8 秒以内的关键。
+//
+// @param {HTMLElement|null} checkInButton - 点击前的签到按钮引用
+// @returns {Promise<{success: boolean, message: string, alreadyCheckedIn?: boolean}>}
+async function pollCheckInResult(checkInButton = null) {
+    const deadline = Date.now() + VERIFY_BUDGET_MS;
+    let round = 0;
+    let lastMessage = '';
+
+    while (Date.now() < deadline) {
+        round++;
+        console.log(`🔍 验证轮次 ${round}（剩余预算 ${Math.max(0, deadline - Date.now())}ms）...`);
+
+        // 零成本：DOM 信号
+        const domResult = checkDomCheckInSignals(checkInButton);
+        if (domResult.confirmed) {
+            console.log(`✅✅✅ 签到成功！（第 ${round} 轮 DOM 确认）`);
+            return {
+                success: true,
+                message: domResult.message || '签到成功！',
+                ...(domResult.alreadyCheckedIn ? { alreadyCheckedIn: true } : {})
+            };
+        }
+        if (domResult.message) {
+            lastMessage = domResult.message;
+        }
+
+        // 较慢：状态 API，按节流频率调用
+        if (round % VERIFY_API_EVERY === 0 && await checkTodayCheckInStatus()) {
+            console.log(`✅✅✅ 签到成功！（第 ${round} 轮 API 确认）`);
+            return { success: true, message: '签到成功（API 验证）' };
+        }
+
+        // 等待下一轮，但绝不越过预算终点
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+            break;
+        }
+        await delay(Math.min(VERIFY_INTERVAL_MS, remaining));
+    }
+
+    // 预算耗尽前，用最权威的 API 做最后一次确认
+    console.log('🔍 验证预算耗尽，做最后一次 API 确认...');
+    if (await checkTodayCheckInStatus()) {
+        console.log('✅✅✅ 签到成功！（最终 API 确认）');
+        return { success: true, message: '签到成功（API 验证）' };
+    }
+
+    console.log('❌ 验证预算内所有验证方式都未确认签到成功');
     return {
         success: false,
-        message: '签到操作已执行，但无法确认是否成功，请手动检查'
+        message: lastMessage || '签到操作已执行，但无法确认是否成功，请手动检查'
     };
+}
+
+// 在时间预算内轮询等待"领取矿石"按钮出现（可选步骤，等不到就放弃）
+async function waitForClaimButton(budgetMs) {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
+        const button = findClaimButton();
+        if (button) {
+            return button;
+        }
+        if (Date.now() >= deadline) {
+            return null;
+        }
+        await delay(300);
+    }
 }
 
 // 检查页面签到状态
@@ -793,48 +887,6 @@ async function attemptAPICheckIn() {
     }
 }
 
-// 获取用户token
-function getUserToken() {
-    try {
-        // 尝试从localStorage获取（常见的token键名）
-        const tokenKeys = ['token', 'accessToken', 'session', 'sessionId', 'uid', 'userId'];
-        for (const key of tokenKeys) {
-            const token = localStorage.getItem(key);
-            if (token) {
-                console.log(`从localStorage获取到token: ${key}`);
-                return token;
-            }
-        }
-
-        // 尝试从sessionStorage获取
-        for (const key of tokenKeys) {
-            const token = sessionStorage.getItem(key);
-            if (token) {
-                console.log(`从sessionStorage获取到token: ${key}`);
-                return token;
-            }
-        }
-
-        // 从cookie中获取
-        const cookies = document.cookie;
-        console.log('当前cookies:', cookies.substring(0, 100) + '...');
-
-        const tokenMatch = cookies.match(/token=([^;]+)/) ||
-                          cookies.match(/session=([^;]+)/) ||
-                          cookies.match(/sessionId=([^;]+)/);
-
-        if (tokenMatch && tokenMatch[1]) {
-            console.log('从cookie获取到token');
-            return tokenMatch[1];
-        }
-
-    } catch (error) {
-        console.log('获取用户token失败:', error);
-    }
-
-    return null;
-}
-
 // 检查用户登录状态
 function checkLoginStatus() {
     // 检查是否存在用户信息元素
@@ -863,37 +915,6 @@ function checkLoginStatus() {
 
     console.log('无法确定登录状态，默认为已登录');
     return true; // 默认假设已登录
-}
-
-// 等待元素出现（修复内存泄漏：确保 observer 被正确清理）
-function waitForElement(selector, timeout = 10000) {
-    return new Promise((resolve, reject) => {
-        const element = document.querySelector(selector);
-        if (element) {
-            resolve(element);
-            return;
-        }
-
-        const observer = new MutationObserver(() => {
-            const element = document.querySelector(selector);
-            if (element) {
-                // 立即断开 observer，防止内存泄漏
-                observer.disconnect();
-                resolve(element);
-            }
-        });
-
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-
-        // 设置超时，确保清理 observer
-        setTimeout(() => {
-            observer.disconnect();
-            reject(new Error(`等待元素超时: ${selector}`));
-        }, timeout);
-    });
 }
 
 // 延迟函数
