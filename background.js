@@ -396,6 +396,74 @@ async function finalizeIfApiVerified(apiResult, config, tabId) {
     return null;
 }
 
+// 从 background 直接查询服务端今日签到状态（不依赖任何标签页）
+// 用于 popup 打开时与服务端核对：本地可能没有记录（网页签到 / 多设备 / 重装）
+async function fetchTodayCheckInFromServer() {
+    try {
+        const response = await fetch('https://api.juejin.cn/growth_api/v2/get_today_status', {
+            method: 'GET',
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            return { ok: false, message: `HTTP ${response.status}` };
+        }
+
+        const data = await response.json();
+        if (data.err_no !== 0 || !data.data) {
+            return { ok: false, message: data.err_msg || `err_no: ${data.err_no}` };
+        }
+
+        // 线上当前字段为 check_in_done；today_status / has_check_in 为旧字段，保留兼容
+        const checkInDone = data.data.check_in_done;
+        const todayStatus = data.data.today_status;
+        const hasCheckIn = data.data.has_check_in;
+
+        return {
+            ok: true,
+            checkedIn: checkInDone === true || todayStatus === 1 || hasCheckIn === true
+        };
+    } catch (error) {
+        return { ok: false, message: error.message };
+    }
+}
+
+// 与服务端核对今日签到状态；服务端已签到但本地无记录时补写本地记录
+// 返回 { synced, config?, reason? }：synced=true 表示本地被补齐，popup 需刷新 UI
+async function syncCheckInStatusFromServer() {
+    const today = new Date().toDateString();
+    const storage = await chrome.storage.local.get(['config']);
+    const config = storage.config;
+
+    if (!config) {
+        return { synced: false, reason: '配置未初始化' };
+    }
+
+    // 本地已记录今日签到，无需再查（也避免重复写入签到历史）
+    if (config.lastCheckInDate === today) {
+        return { synced: false, config, reason: '本地已记录今日签到' };
+    }
+
+    const status = await fetchTodayCheckInFromServer();
+    if (!status.ok) {
+        console.log('ℹ️ 服务端签到状态核对失败，保持本地状态:', status.message);
+        return { synced: false, config, reason: status.message };
+    }
+    if (!status.checkedIn) {
+        return { synced: false, config, reason: '服务端今日未签到' };
+    }
+
+    // 服务端已签到但本地无记录：补写本地（沿用 updateCheckInHistory 维护历史与连续天数）
+    console.log('🔄 服务端已签到但本地无记录，补写本地签到状态');
+    await updateCheckInHistory(
+        { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' },
+        config
+    );
+
+    const updated = (await chrome.storage.local.get(['config'])).config;
+    return { synced: true, config: updated };
+}
+
 // 通过 API 验证签到状态（用于消息通道关闭后的备用验证）
 async function verifyCheckInViaApi(tabId) {
     try {
@@ -420,12 +488,14 @@ async function verifyCheckInViaApi(tabId) {
                         console.log('📋 API 验证响应:', JSON.stringify(data));
 
                         if (data.err_no === 0 && data.data) {
+                            // 线上当前字段为 check_in_done；today_status / has_check_in 为旧字段，保留兼容
+                            const checkInDone = data.data.check_in_done;
                             const todayStatus = data.data.today_status;
                             const hasCheckIn = data.data.has_check_in;
 
-                            if (todayStatus === 1 || hasCheckIn === true) {
+                            if (checkInDone === true || todayStatus === 1 || hasCheckIn === true) {
                                 return { success: true, alreadyCheckedIn: true, message: '今日已签到（API 验证）' };
-                            } else if (todayStatus === 0 || hasCheckIn === false) {
+                            } else if (checkInDone === false || todayStatus === 0 || hasCheckIn === false) {
                                 return { success: false, message: '今日未签到（API 验证）' };
                             }
                         } else if (data.err_no !== 0) {
@@ -681,6 +751,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ success: false, message: error.message });
         });
         return true; // 保持消息通道开启
+    }
+
+    if (request.action === 'syncCheckInStatus') {
+        // popup 打开时与服务端核对，纠正"网页/多设备签到导致本地显示未签到"
+        syncCheckInStatusFromServer().then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ synced: false, reason: error.message });
+        });
+        return true;
     }
 
     if (request.action === 'getConfig') {

@@ -941,20 +941,22 @@ async function checkTodayCheckInStatus() {
             // err_no === 0 表示请求成功
             if (data.err_no === 0 && data.data) {
                 // 检查是否已签到
+                // 线上当前字段为 check_in_done；today_status / has_check_in 为旧字段，保留兼容
+                const checkInDone = data.data.check_in_done;
                 const todayStatus = data.data.today_status;
                 const hasCheckIn = data.data.has_check_in;
 
                 console.log('📊 签到状态数据:', {
+                    check_in_done: checkInDone,
                     today_status: todayStatus,
                     has_check_in: hasCheckIn
                 });
 
-                // today_status: 1 = 已签到, 0 = 未签到
-                // has_check_in: true = 已签到
-                if (todayStatus === 1 || hasCheckIn === true) {
+                // check_in_done: true = 已签到; today_status: 1 = 已签到; has_check_in: true = 已签到
+                if (checkInDone === true || todayStatus === 1 || hasCheckIn === true) {
                     console.log('✅ API 返回：今日已签到');
                     return true;
-                } else if (todayStatus === 0 || hasCheckIn === false) {
+                } else if (checkInDone === false || todayStatus === 0 || hasCheckIn === false) {
                     console.log('⚠️ API 返回：今日未签到');
                     return false;
                 }

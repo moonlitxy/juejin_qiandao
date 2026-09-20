@@ -49,6 +49,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 更新签到状态（传入已读取的 config，避免重复读取）
     updateCheckInStatus(config);
 
+    // 与服务端核对一次：本地可能没有记录（网页签到 / 多设备 / 重装），
+    // 否则会误显示"未签到"
+    syncCheckInStatusFromServer();
+
     // 监听来自background的消息（签到完成后更新状态）
     // background 现在成功和失败都会广播 checkInCompleted，UI 以它为准
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -116,6 +120,20 @@ async function loadConfig() {
         console.error('加载配置失败:', error);
         showError('加载配置失败');
         return null;
+    }
+}
+
+// 与服务端核对签到状态；本地记录被补齐时刷新 UI
+async function syncCheckInStatusFromServer() {
+    try {
+        const response = await sendMessage({ action: 'syncCheckInStatus' });
+        if (response && response.synced) {
+            console.log('服务端已签到但本地无记录，已补齐，刷新 UI');
+            const config = await loadConfig();
+            updateCheckInStatus(config);
+        }
+    } catch (error) {
+        console.warn('同步服务端签到状态失败:', error);
     }
 }
 
