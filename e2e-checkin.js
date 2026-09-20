@@ -127,6 +127,12 @@ function assert(name, cond, detail) {
     const st = stRes.json;
     log('GET get_today_status =', JSON.stringify(st));
 
+    // 服务端连续/累计签到天数（网站显示的"连续签到 N 天"就是 cont_count）
+    const countsRes = await apiGet('https://api.juejin.cn/growth_api/v1/get_counts');
+    const contCount = countsRes.json && countsRes.json.data ? countsRes.json.data.cont_count : null;
+    log('GET get_counts =', JSON.stringify(countsRes.json));
+    assert('服务端返回连续签到天数 cont_count', Number.isInteger(contCount), 'cont_count=' + contCount);
+
     // 打印真实字段名，核对插件判据 today_status / has_check_in 是否还与线上一致
     const fields = st && st.data ? Object.keys(st.data) : [];
     log('data 字段:', JSON.stringify(fields));
@@ -160,6 +166,7 @@ function assert(name, cond, detail) {
             btn: btn.textContent.replace(/\s+/g, ''),
             disabled: btn.disabled,
             last: document.getElementById('lastCheckInTime').textContent.trim(),
+            consecutive: document.getElementById('consecutiveDays').textContent.trim(),
             toast: (document.getElementById('notification-container') || {}).innerText || '',
         };
     });
@@ -172,6 +179,9 @@ function assert(name, cond, detail) {
     log('场景A（本地无记录、未点击）popup 状态 =', JSON.stringify(syncedUI, null, 2));
     assert('场景A：打开插件即自动显示"今日已签到"（服务端同步）',
         syncedUI.title.includes('今日已签到'), syncedUI.title + ' / ' + syncedUI.btn);
+    assert('场景A：连续签到天数与网站一致（cont_count）',
+        syncedUI.consecutive === String(contCount),
+        `popup=${syncedUI.consecutive} 服务端=${contCount}`);
     await popup.screenshot({ path: path.join(OUT, 'e2e-popup-synced.png') });
 
     // ===== 场景 B：本地无记录 + 触发 manualCheckIn → 已签到判据走服务端 API =====

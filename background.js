@@ -363,6 +363,8 @@ async function testContentScriptReady(tabId) {
 async function finalizeCheckInSuccess(result, config) {
     // 传递已读取的 config，避免重复读取存储
     await updateCheckInHistory(result, config);
+    // 连续签到天数以服务端为准（本地推算可能有偏差；断签由服务端重置）
+    await syncConsecutiveDaysFromServer();
     const message = result.alreadyCheckedIn ?
         (result.message || '今天已经签到过了') :
         (result.message || '掘金签到完成！');
@@ -428,8 +430,56 @@ async function fetchTodayCheckInFromServer() {
     }
 }
 
-// 与服务端核对今日签到状态；服务端已签到但本地无记录时补写本地记录
-// 返回 { synced, config?, reason? }：synced=true 表示本地被补齐，popup 需刷新 UI
+// 查询服务端签到统计：cont_count=连续签到天数，sum_count=累计签到天数
+async function fetchCheckInCountsFromServer() {
+    try {
+        const response = await fetch('https://api.juejin.cn/growth_api/v1/get_counts', {
+            method: 'GET',
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            return { ok: false, message: `HTTP ${response.status}` };
+        }
+
+        const data = await response.json();
+        if (data.err_no !== 0 || !data.data) {
+            return { ok: false, message: data.err_msg || `err_no: ${data.err_no}` };
+        }
+
+        return { ok: true, contCount: data.data.cont_count, sumCount: data.data.sum_count };
+    } catch (error) {
+        return { ok: false, message: error.message };
+    }
+}
+
+// 用服务端连续签到天数覆盖本地值（断签时服务端会自行重置，天然正确）
+// 返回 true 表示本地被更新
+async function syncConsecutiveDaysFromServer() {
+    const counts = await fetchCheckInCountsFromServer();
+    if (!counts.ok || !Number.isInteger(counts.contCount)) {
+        console.log('ℹ️ 连续签到天数同步失败，保留本地值:', counts.message);
+        return false;
+    }
+
+    const storage = await chrome.storage.local.get(['config']);
+    if (!storage.config) {
+        return false;
+    }
+
+    const config = { ...DEFAULT_CONFIG, ...storage.config };
+    if (config.consecutiveDays === counts.contCount) {
+        return false;
+    }
+
+    config.consecutiveDays = counts.contCount;
+    await chrome.storage.local.set({ config });
+    console.log('🔄 连续签到天数已按服务端更新为', counts.contCount);
+    return true;
+}
+
+// 与服务端核对签到状态：连续天数以服务端为准；服务端已签到而本地无记录时补写
+// 返回 { synced, config?, reason? }：synced=true 表示本地有更新，popup 需刷新 UI
 async function syncCheckInStatusFromServer() {
     const today = new Date().toDateString();
     const storage = await chrome.storage.local.get(['config']);
@@ -439,29 +489,32 @@ async function syncCheckInStatusFromServer() {
         return { synced: false, reason: '配置未初始化' };
     }
 
-    // 本地已记录今日签到，无需再查（也避免重复写入签到历史）
-    if (config.lastCheckInDate === today) {
-        return { synced: false, config, reason: '本地已记录今日签到' };
+    let changed = false;
+
+    // 服务端已签到但本地无记录（网页签到 / 多设备 / 重装）→ 补写本地
+    if (config.lastCheckInDate !== today) {
+        const status = await fetchTodayCheckInFromServer();
+        if (!status.ok) {
+            console.log('ℹ️ 服务端签到状态核对失败，保持本地状态:', status.message);
+        } else if (status.checkedIn) {
+            console.log('🔄 服务端已签到但本地无记录，补写本地签到状态');
+            await updateCheckInHistory(
+                { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' },
+                config
+            );
+            changed = true;
+        }
     }
 
-    const status = await fetchTodayCheckInFromServer();
-    if (!status.ok) {
-        console.log('ℹ️ 服务端签到状态核对失败，保持本地状态:', status.message);
-        return { synced: false, config, reason: status.message };
+    // 连续天数以服务端为准，放最后覆盖本地推算值（updateCheckInHistory 也会改它）
+    if (await syncConsecutiveDaysFromServer()) {
+        changed = true;
     }
-    if (!status.checkedIn) {
-        return { synced: false, config, reason: '服务端今日未签到' };
-    }
-
-    // 服务端已签到但本地无记录：补写本地（沿用 updateCheckInHistory 维护历史与连续天数）
-    console.log('🔄 服务端已签到但本地无记录，补写本地签到状态');
-    await updateCheckInHistory(
-        { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' },
-        config
-    );
 
     const updated = (await chrome.storage.local.get(['config'])).config;
-    return { synced: true, config: updated };
+    return changed
+        ? { synced: true, config: updated }
+        : { synced: false, config: updated, reason: '本地已是最新' };
 }
 
 // 通过 API 验证签到状态（用于消息通道关闭后的备用验证）
