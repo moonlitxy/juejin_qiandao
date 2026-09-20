@@ -365,6 +365,8 @@ async function finalizeCheckInSuccess(result, config) {
     await updateCheckInHistory(result, config);
     // 连续签到天数以服务端为准（本地推算可能有偏差；断签由服务端重置）
     await syncConsecutiveDaysFromServer();
+    // 本月签到天数同样以服务端为准（此刻今日已签到，故传 true）
+    await syncMonthCountFromServer(true);
     const message = result.alreadyCheckedIn ?
         (result.message || '今天已经签到过了') :
         (result.message || '掘金签到完成！');
@@ -478,7 +480,77 @@ async function syncConsecutiveDaysFromServer() {
     return true;
 }
 
-// 与服务端核对签到状态：连续天数以服务端为准；服务端已签到而本地无记录时补写
+// 查询本月签到天数（服务端 get_by_month 返回整月 {date, status, point}）
+// status: 3=已签到, 2=漏签, 4=未来; 今天的记录单独用 status 表示（线上为 1），
+// 故今天是否算作已签由 checkedIn 参数决定（来自 get_today_status，最权威）
+async function fetchMonthCheckInCountFromServer(checkedIn) {
+    try {
+        const response = await fetch('https://api.juejin.cn/growth_api/v1/get_by_month', {
+            method: 'GET',
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            return { ok: false, message: `HTTP ${response.status}` };
+        }
+
+        const data = await response.json();
+        if (data.err_no !== 0 || !Array.isArray(data.data)) {
+            return { ok: false, message: data.err_msg || `err_no: ${data.err_no}` };
+        }
+
+        const keyOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const now = new Date();
+        const todayKey = keyOf(now);
+        const monthKey = todayKey.slice(0, 7);
+
+        let count = 0;
+        let todayCounted = false;
+        for (const row of data.data) {
+            if (row.status !== 3) continue;
+            const key = keyOf(new Date(row.date * 1000));
+            if (!key.startsWith(monthKey)) continue;
+            count++;
+            if (key === todayKey) todayCounted = true;
+        }
+
+        if (!todayCounted && checkedIn === true) {
+            count++;
+        }
+
+        return { ok: true, month: monthKey, count };
+    } catch (error) {
+        return { ok: false, message: error.message };
+    }
+}
+
+// 用服务端数据刷新本月签到天数（跨月时 month 变化也会触发更新）
+// checkedIn: 今日服务端签到状态，null 表示未知
+async function syncMonthCountFromServer(checkedIn) {
+    const month = await fetchMonthCheckInCountFromServer(checkedIn);
+    if (!month.ok) {
+        console.log('ℹ️ 本月签到天数同步失败，保留本地值:', month.message);
+        return false;
+    }
+
+    const storage = await chrome.storage.local.get(['config']);
+    if (!storage.config) {
+        return false;
+    }
+
+    const config = { ...DEFAULT_CONFIG, ...storage.config };
+    if (config.monthCheckInMonth === month.month && config.monthCheckInCount === month.count) {
+        return false;
+    }
+
+    config.monthCheckInMonth = month.month;
+    config.monthCheckInCount = month.count;
+    await chrome.storage.local.set({ config });
+    console.log('🔄 本月签到天数已按服务端更新为', month.count);
+    return true;
+}
+
+// 与服务端核对签到状态：连续/本月天数以服务端为准；服务端已签到而本地无记录时补写
 // 返回 { synced, config?, reason? }：synced=true 表示本地有更新，popup 需刷新 UI
 async function syncCheckInStatusFromServer() {
     const today = new Date().toDateString();
@@ -491,23 +563,29 @@ async function syncCheckInStatusFromServer() {
 
     let changed = false;
 
+    // 今日签到状态（后面统计本月天数也要用）
+    const status = await fetchTodayCheckInFromServer();
+    const checkedIn = status.ok && status.checkedIn === true;
+
     // 服务端已签到但本地无记录（网页签到 / 多设备 / 重装）→ 补写本地
     if (config.lastCheckInDate !== today) {
-        const status = await fetchTodayCheckInFromServer();
-        if (!status.ok) {
-            console.log('ℹ️ 服务端签到状态核对失败，保持本地状态:', status.message);
-        } else if (status.checkedIn) {
+        if (checkedIn) {
             console.log('🔄 服务端已签到但本地无记录，补写本地签到状态');
             await updateCheckInHistory(
                 { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' },
                 config
             );
             changed = true;
+        } else if (!status.ok) {
+            console.log('ℹ️ 服务端签到状态核对失败，保持本地状态:', status.message);
         }
     }
 
-    // 连续天数以服务端为准，放最后覆盖本地推算值（updateCheckInHistory 也会改它）
+    // 服务端统计放最后，覆盖本地推算值（updateCheckInHistory 也会改 consecutiveDays）
     if (await syncConsecutiveDaysFromServer()) {
+        changed = true;
+    }
+    if (await syncMonthCountFromServer(status.ok ? checkedIn : null)) {
         changed = true;
     }
 

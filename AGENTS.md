@@ -29,6 +29,9 @@
 ## 保存约定
 
 - `chrome.storage.local` 存 `config` 对象，唯一定义在 `shared/config.js` 的 `DEFAULT_CONFIG`；加字段只改这一处并同步 `CONFIG_KEYS`（目前无调用方，仅作键名清单保留）与所有读写点。
-- `consecutiveDays` **以服务端为准**：`GET growth_api/v1/get_counts` 的 `cont_count`（即网站"连续签到 N 天"，`sum_count` 为累计天数），断签由服务端自行重置。本地 `updateCheckInHistory` 的 +1/重置推算只是兜底，`syncConsecutiveDaysFromServer()` 会覆盖它——注意调用顺序，服务端同步必须排在 `updateCheckInHistory` **之后**，否则会被本地的 0 冲掉。
+- `consecutiveDays` / `monthCheckInCount` **以服务端为准**，本地推算只是兜底：
+  - 连续天数：`GET growth_api/v1/get_counts` 的 `cont_count`（即网站"连续签到 N 天"，`sum_count` 为累计天数），断签由服务端自行重置。
+  - 本月天数：`GET growth_api/v1/get_by_month`（整月 `{date, status, point}`）。`status`: **3=已签到**、2=漏签、4=未来；**今天的记录是独立 status（线上为 1）**，是否算已签要用 `get_today_status` 的 `check_in_done` 判定，不能只看 `status===3`。
+  - `syncConsecutiveDaysFromServer()` / `syncMonthCountFromServer()` 会覆盖本地值（popup 用 `monthCheckInMonth==='YYYY-MM'` 判断是否可用）。**注意调用顺序**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则会被本地的 0 冲掉。
 - **`.gitignore` 里有 `docs/`**，但现有文档都是当初 `git add -f` 强塞进去的。新增/修改 `docs/` 下的文件必须用 `git add -f`，否则静默被忽略。
 - 注释多为中文，保持现有命名与注释习惯。

@@ -11,6 +11,8 @@ const DEFAULT_CONFIG = {
     lastCheckInDate: null,      // 最后签到日期
     checkInHistory: [],         // 签到历史记录
     consecutiveDays: 0,         // 连续签到天数
+    monthCheckInCount: 0,       // 本月签到天数（服务端 get_by_month 统计）
+    monthCheckInMonth: null,    // 上面的统计所属月份（'YYYY-MM'，跨月需重新拉取）
     successNotification: true,  // 成功通知开关
     failureNotification: true,  // 失败通知开关
     retryCount: 1,              // 重试次数
@@ -27,6 +29,8 @@ const CONFIG_KEYS = {
     LAST_CHECK_IN_DATE: 'lastCheckInDate',
     CHECK_IN_HISTORY: 'checkInHistory',
     CONSECUTIVE_DAYS: 'consecutiveDays',
+    MONTH_CHECK_IN_COUNT: 'monthCheckInCount',
+    MONTH_CHECK_IN_MONTH: 'monthCheckInMonth',
     SUCCESS_NOTIFICATION: 'successNotification',
     FAILURE_NOTIFICATION: 'failureNotification',
     RETRY_COUNT: 'retryCount',

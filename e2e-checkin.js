@@ -144,6 +144,26 @@ function assert(name, cond, detail) {
         fields.includes('check_in_done'),
         '实际字段: ' + JSON.stringify(fields));
 
+    // 服务端本月签到天数：get_by_month（status:3=已签到；今天的记录单独用 status 表示，
+    // 用今日签到状态补上）
+    const byMonthRes = await apiGet('https://api.juejin.cn/growth_api/v1/get_by_month');
+    const monthRows = (byMonthRes.json && Array.isArray(byMonthRes.json.data)) ? byMonthRes.json.data : [];
+    const keyOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayKey = keyOf(new Date());
+    const monthKey = todayKey.slice(0, 7);
+    let monthCount = 0;
+    let todayCounted = false;
+    for (const row of monthRows) {
+        if (row.status !== 3) continue;
+        const k = keyOf(new Date(row.date * 1000));
+        if (!k.startsWith(monthKey)) continue;
+        monthCount++;
+        if (k === todayKey) todayCounted = true;
+    }
+    if (!todayCounted && serverCheckedIn) monthCount++;
+    log(`服务端本月签到天数 = ${monthCount}（${monthKey}）`);
+    assert('服务端返回本月签到明细', monthRows.length > 0, 'rows=' + monthRows.length);
+
     // 打开 popup 页面（扩展页，可正常使用 chrome.runtime）
     const popup = await context.newPage();
     popup.on('console', (m) => log('[popup]', m.text()));
@@ -167,6 +187,7 @@ function assert(name, cond, detail) {
             disabled: btn.disabled,
             last: document.getElementById('lastCheckInTime').textContent.trim(),
             consecutive: document.getElementById('consecutiveDays').textContent.trim(),
+            total: document.getElementById('totalDays').textContent.trim(),
             toast: (document.getElementById('notification-container') || {}).innerText || '',
         };
     });
@@ -182,6 +203,9 @@ function assert(name, cond, detail) {
     assert('场景A：连续签到天数与网站一致（cont_count）',
         syncedUI.consecutive === String(contCount),
         `popup=${syncedUI.consecutive} 服务端=${contCount}`);
+    assert('场景A：本月签到天数来自服务端（本地历史已清空）',
+        syncedUI.total === String(monthCount) && Number(syncedUI.total) > 0,
+        `popup=${syncedUI.total} 服务端=${monthCount}`);
     await popup.screenshot({ path: path.join(OUT, 'e2e-popup-synced.png') });
 
     // ===== 场景 B：本地无记录 + 触发 manualCheckIn → 已签到判据走服务端 API =====
@@ -212,7 +236,7 @@ function assert(name, cond, detail) {
 
     fs.writeFileSync(
         path.join(OUT, 'e2e-result.json'),
-        JSON.stringify({ extId, serverCheckedIn, status: st, syncedUI, before, after, results }, null, 2)
+        JSON.stringify({ extId, serverCheckedIn, status: st, contCount, monthCount, syncedUI, before, after, results }, null, 2)
     );
 
     const failed = results.filter((r) => !r.pass);

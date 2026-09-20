@@ -189,17 +189,25 @@ function updateStatistics(config) {
     // 连续签到天数
     elements.consecutiveDays.textContent = config.consecutiveDays || 0;
 
-    // 计算本月签到天数
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    const thisMonthCheckIns = (config.checkInHistory || []).filter(record => {
-        const recordDate = new Date(record.date);
-        return recordDate.getMonth() === currentMonth &&
-               recordDate.getFullYear() === currentYear &&
-               record.status === 'success';
-    });
+    // 本月签到天数：优先用服务端统计（打开时 syncCheckInStatus 会刷新），
+    // 月份不符或缺失时回退到本地历史推算
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-    elements.totalDays.textContent = thisMonthCheckIns.length;
+    let totalDays;
+    if (config.monthCheckInMonth === monthKey && Number.isInteger(config.monthCheckInCount)) {
+        totalDays = config.monthCheckInCount;
+    } else {
+        const thisMonthCheckIns = (config.checkInHistory || []).filter(record => {
+            const recordDate = new Date(record.date);
+            return recordDate.getMonth() === now.getMonth() &&
+                   recordDate.getFullYear() === now.getFullYear() &&
+                   record.status === 'success';
+        });
+        totalDays = thisMonthCheckIns.length;
+    }
+
+    elements.totalDays.textContent = totalDays;
 }
 
 // 更新上次签到时间
