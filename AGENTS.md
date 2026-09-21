@@ -25,6 +25,7 @@
 - `needRedirect` 归 background 处理：content 只返回 `{success:false, needRedirect:true, redirectUrl}`，由 background `chrome.tabs.update` 跳转后重试，content 不自己跳转。
 - **重复签到不是错误**：签到前按 API 查询 > 页面文字 > 按钮状态顺序检测，必须返回 `{success:true, alreadyCheckedIn:true}`。掘金端点：`GET growth_api/v2/get_today_status`（**当前字段是 `check_in_done`**；`today_status`/`has_check_in` 已从响应中消失，代码保留兼容，新增判据以 `check_in_done` 为主），`POST growth_api/v1/check_in`（`err_no===10001` 或文案含"重复"/"已经"即重复签到，需登录态 `credentials:'include'`）。注意该 GET 接口**未登录时也返回 `err_no:0`**，不能用来判断登录态；要判登录用 `GET growth_api/v1/get_cur_point`（未登录返回 `err_no:403 must login`）。
 - `content.js` 顶部时间预算常量（`VERIFY_BUDGET_MS=4500` 等）是唯一调参点，函数里禁止塞魔数；通道关闭/超时一律先 API 验证再直签，不要直接判失败（消息通道关闭 ≠ 签到失败）。
+- **跨域 API 签到必须用 `world:'MAIN'`**：内容脚本（隔离世界）对 `api.juejin.cn` 的 **GET 能过、POST 被 CORS 拦**（报 `TypeError: Failed to fetch`）。所以 background 里 `verifyCheckInViaApi` / `attemptCheckInViaApi` 的 `chrome.scripting.executeScript` 必须带 `world:'MAIN'`，否则兜底直签永远不会成功。相应地，content.js 自带的 `attemptAPICheckIn()` 在隔离世界里发 POST 注定失败，只是历史遗留，真正的兜底在 background——content.js 报失败时 `runCheckInAttempt` 也会再走一遍 API 验证 + 直签。
 
 ## 保存约定
 

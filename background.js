@@ -324,8 +324,17 @@ async function runCheckInAttempt(state) {
     if (response && (response.success || response.alreadyCheckedIn)) {
         result = await finalizeCheckInSuccess(response, config);
     } else {
-        result = finalizeCheckInFailure(
-            response?.message || '签到操作失败，请手动检查', config);
+        // content.js 报告失败时，也不能直接判死：先 API 验证，再 API 直签。
+        // 原因：内容脚本在隔离世界，跨域 POST 会被 CORS 拦截，只有 background
+        // 用 world:'MAIN' 注入的请求才能真正完成签到。
+        const verified = await finalizeIfApiVerified(await verifyCheckInViaApi(tabId), config, tabId);
+        if (verified) {
+            result = verified;
+        } else {
+            const apiChecked = await finalizeIfApiVerified(await attemptCheckInViaApi(tabId), config, tabId);
+            result = apiChecked || finalizeCheckInFailure(
+                response?.message || '签到操作失败，请手动检查', config);
+        }
     }
 
     // 延迟关闭标签页（给用户看结果的时间）
@@ -601,8 +610,10 @@ async function verifyCheckInViaApi(tabId) {
         console.log('🔍 通过 API 验证签到状态...');
 
         // 在页面上下文中执行 API 请求
+        // world:'MAIN'：与签到一致，避免隔离世界的跨域限制
         const results = await chrome.scripting.executeScript({
             target: { tabId: tabId },
+            world: 'MAIN',
             func: async () => {
                 try {
                     const response = await fetch('https://api.juejin.cn/growth_api/v2/get_today_status', {
@@ -662,8 +673,11 @@ async function attemptCheckInViaApi(tabId) {
     try {
         console.log('🔧 尝试使用 API 直接签到...');
 
+        // world:'MAIN' 很关键：内容脚本所在隔离世界的跨域 POST 会被 CORS 拦截
+        // （GET 能过、POST 不能），必须在页面主世界执行才能真正签到成功
         const results = await chrome.scripting.executeScript({
             target: { tabId: tabId },
+            world: 'MAIN',
             func: async () => {
                 try {
                     const response = await fetch('https://api.juejin.cn/growth_api/v1/check_in', {
