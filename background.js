@@ -63,6 +63,30 @@ function getNextScheduleTime(hours, minutes) {
     return target.getTime();
 }
 
+// 浏览器启动兜底：Chrome 会在启动后补触发错过的闹钟，但闹钟持久化官方"不保证"
+// （重启可能被清），且重复闹钟错过多次后周期会漂移。这里补两件事：
+// 过点未签就立即补签、把闹钟拉回设定的 wall-clock 时间。
+chrome.runtime.onStartup.addListener(async () => {
+    const { config } = await chrome.storage.local.get('config');
+    const cfg = config || {};
+    const [hours, minutes] = (cfg.checkInTime || '09:00').split(':').map(Number);
+
+    const now = new Date();
+    const target = new Date();
+    target.setHours(hours, minutes, 0, 0);
+
+    // 已过今天的签到点且今天还没签 → 立即补一次
+    // （闹钟被清时这是唯一的补救机会；未被清时与 Chrome 的补触发互为幂等）
+    const signedToday = cfg.lastCheckInDate === now.toDateString();
+    if (target <= now && !signedToday && cfg.enabled !== false) {
+        console.log('🔁 启动时发现今日已过签到时间且未签到，立即补签');
+        await performCheckIn(null, 'auto');
+    }
+
+    // 重建闹钟：同名覆盖，把漂移的周期拉回设定时间
+    setupDailyAlarm();
+});
+
 // 监听闹钟触发
 chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === 'dailyCheckIn') {

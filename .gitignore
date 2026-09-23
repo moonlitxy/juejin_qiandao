@@ -45,3 +45,6 @@ test/
 *.test.js
 coverage/
 docs/
+
+# e2e / 分析脚本产物
+analysis-output/
