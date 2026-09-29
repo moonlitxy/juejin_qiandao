@@ -23,9 +23,21 @@
 - `updateConfig` 是**合并语义**（`{...DEFAULT_CONFIG, ...已存, ...传入}`），调用方可只传部分字段；不要改成整体覆盖，否则会抹掉 `lastCheckInDate` / `checkInHistory` / `consecutiveDays`。
 - 重试状态存 `chrome.storage.session`（`checkInRetry`），闹钟触发时恢复、用完即删——因为 SW 随时会被终止，不能放内存变量。
 - `needRedirect` 归 background 处理：content 只返回 `{success:false, needRedirect:true, redirectUrl}`，由 background `chrome.tabs.update` 跳转后重试，content 不自己跳转。
-- **重复签到不是错误**：签到前按 API 查询 > 页面文字 > 按钮状态顺序检测，必须返回 `{success:true, alreadyCheckedIn:true}`。掘金端点：`GET growth_api/v2/get_today_status`（**当前字段是 `check_in_done`**；`today_status`/`has_check_in` 已从响应中消失，代码保留兼容，新增判据以 `check_in_done` 为主），`POST growth_api/v1/check_in`（`err_no===10001` 或文案含"重复"/"已经"即重复签到，需登录态 `credentials:'include'`）。注意该 GET 接口**未登录时也返回 `err_no:0`**，不能用来判断登录态；要判登录用 `GET growth_api/v1/get_cur_point`（未登录返回 `err_no:403 must login`）。
+- **重复签到不是错误**：签到前按 API 查询 > 页面文字 > 按钮状态顺序检测，必须返回 `{success:true, alreadyCheckedIn:true}`。掘金端点：`GET growth_api/v2/get_today_status`（**当前字段是 `check_in_done`**；`today_status`/`has_check_in` 已从响应中消失，代码保留兼容，新增判据以 `check_in_done` 为主），`POST growth_api/v1/check_in`（**线上实测 `err_no===15001`** 即"您今日已完成签到，请勿重复签到"；原代码写的是 `10001` 且从未命中过，一直靠 `err_msg` 文案兜命，现已修正并保留 `10001` 兼容。需登录态 `credentials:'include'`）。注意该 GET 接口**未登录时也返回 `err_no:0`**，不能用来判断登录态；要判登录用 `GET growth_api/v1/get_cur_point`（未登录返回 `err_no:403 must login`）。
 - `content.js` 顶部时间预算常量（`VERIFY_BUDGET_MS=4500` 等）是唯一调参点，函数里禁止塞魔数；通道关闭/超时一律先 API 验证再直签，不要直接判失败（消息通道关闭 ≠ 签到失败）。
 - **跨域 API 签到必须用 `world:'MAIN'`**：内容脚本（隔离世界）对 `api.juejin.cn` 的 **GET 能过、POST 被 CORS 拦**（报 `TypeError: Failed to fetch`）。所以 background 里 `verifyCheckInViaApi` / `attemptCheckInViaApi` 的 `chrome.scripting.executeScript` 必须带 `world:'MAIN'`，否则兜底直签永远不会成功。相应地，content.js 自带的 `attemptAPICheckIn()` 在隔离世界里发 POST 注定失败，只是历史遗留，真正的兜底在 background——content.js 报失败时 `runCheckInAttempt` 也会再走一遍 API 验证 + 直签。
+
+## 云端签到（GitHub Actions）
+
+扩展的 `chrome.alarms` 依赖本机浏览器常驻，**电脑关机/休眠/断网就漏签**（已实测断过签，连续天数掉到 2）。所以另有一套云端签到，两者**天然幂等不冲突**（重复签到返回 `15001`，两边都判 `alreadyCheckedIn`）。扩展的连续/本月天数本就以服务端为准，popup 打开时会自动同步云端签到的结果。
+
+- 入口：`.github/workflows/checkin.yml`（workflow 名「掘金签到」），核心逻辑 `scripts/checkin.mjs`。**目前只挂 `workflow_dispatch`，`schedule` 整段注释在文件里**，云端验证通过后再启用。
+- 本地跑：`JUEJIN_COOKIE='...' node scripts/checkin.mjs`，`--dry-run` 只查询不签到，`--headed` 显示浏览器窗口。Cookie 只从环境变量读，日志只回显长度不打印原文。
+- **云端签到必须用 Playwright，不能用纯 fetch/curl**：`POST growth_api/v1/check_in` 依赖 `x-secsdk-csrf-token`（字节 X-Ware-Csrf-Token，服务端响应头里有 `access-control-expose-headers: X-Ware-Csrf-Token` 自证）+ `msToken` / `ttwid` 风控 cookie。**缺失时接口返回 HTTP 200 + 空 body**（不是报错，极易误判成成功），必须加载真实页面让 JS 种出这些参数，再在页面上下文（MAIN world）发请求。详见 `scripts/diagnose-post.mjs` 的抓包对比。
+- 登录探针必须用 `get_cur_point`（未登录 `err_no:403`）。`get_today_status` **未登录也返 `err_no:0`**，用它判登录会漏。
+- 配置 Secret：`Settings → Secrets and variables → Actions → JUEJIN_COOKIE`（必须是**仓库**设置，不是账号设置）。或 `gh secret set JUEJIN_COOKIE --repo moonlitxy/juejin_qiandao`。⚠️ 等同账号钥匙，绝不能进仓库；`.gitignore` 已忽略 `test/` 与本地跳转软链接。
+- GitHub 的 cron **是 UTC**（北京 = UTC+8），且有 5~15 分钟随机延迟，**避开整点**；连续两个月无活动会自动禁用定时任务，手动触发一次即可恢复。
+- `.gitignore` 原先忽略 `package-lock.json`，已放行——workflow 用 `npm ci`，不锁版本会导致每次装到不同的 playwright。
 
 ## 保存约定
 
