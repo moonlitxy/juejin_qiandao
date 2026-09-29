@@ -856,7 +856,8 @@ async function attemptAPICheckIn() {
                     message: 'API 签到成功',
                     data: data.data
                 };
-            } else if (data.err_no === 10001 || data.err_msg?.includes('重复') || data.err_msg?.includes('已经')) {
+                // 线上实测重复签到返回 15001（10001 为旧值，保留兼容）
+            } else if (data.err_no === 15001 || data.err_no === 10001 || data.err_msg?.includes('重复') || data.err_msg?.includes('已经')) {
                 console.log('ℹ️ API 返回重复签到');
                 return {
                     success: true,

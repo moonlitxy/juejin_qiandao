@@ -722,7 +722,8 @@ async function attemptCheckInViaApi(tabId) {
 
                         if (data.err_no === 0) {
                             return { success: true, message: 'API 签到成功' };
-                        } else if (data.err_no === 10001 || data.err_msg?.includes('重复') || data.err_msg?.includes('已经')) {
+                            // 线上实测重复签到返回 15001（10001 为旧值，保留兼容）
+                        } else if (data.err_no === 15001 || data.err_no === 10001 || data.err_msg?.includes('重复') || data.err_msg?.includes('已经')) {
                             return { success: true, alreadyCheckedIn: true, message: data.err_msg || '今天已经签到过了' };
                         }
                         return { success: false, message: data.err_msg || `API 签到失败 (err_no: ${data.err_no})` };

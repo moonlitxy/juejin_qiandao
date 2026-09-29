@@ -1,0 +1,66 @@
+# 掘金每日签到（GitHub Actions）
+#
+# 为什么用 Actions 而不是扩展的 chrome.alarms：
+# 扩展依赖本机浏览器常驻，电脑关机/休眠/断网就漏签（实测已断过签）。
+# Actions 在云端跑，不受本机状态影响。
+#
+# 必配 Secret：Settings → Secrets and variables → Actions → New repository secret
+#   名称 JUEJIN_COOKIE，值为浏览器里复制的完整 cookie 串。
+#   ⚠️ 它等同于账号钥匙，绝不能提交进仓库或写进 workflow 文件。
+#
+# 本阶段仅开 workflow_dispatch（手动触发），云端验证通过后再加 schedule。
+
+name: 掘金签到
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只查询状态，不真正签到'
+        type: boolean
+        default: false
+
+# schedule（云端验证通过后再启用）：
+#   注意 cron 是 UTC，北京时间 = UTC + 8
+#   '13 1 * * *' = 北京时间 9:13
+#   避开整点：GitHub 的 cron 有 5~15 分钟随机延迟，整点高峰排队更久
+#   连续两个月无活动会自动禁用定时任务，届时手动触发一次即可恢复
+# on:
+#   schedule:
+#     - cron: '13 1 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    # 签到页要等页面 JS 种下 msToken / ttwid / csrf token，给足超时
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Playwright 的 chromium 有 300MB+， 缓存可省掉每次重新下载
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
+
+      - name: 安装依赖
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install chromium --with-deps
+
+      - name: 执行签到
+        env:
+          # 从 Secret 注入；不要用 set -x 或 echo，否则 Cookie 会进日志
+          JUEJIN_COOKIE: ${{ secrets.JUEJIN_COOKIE }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node scripts/checkin.mjs ${{ inputs.dry_run && '--dry-run' || '' }}

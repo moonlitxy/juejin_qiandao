@@ -20,12 +20,14 @@ Desktop.ini
 *.temp
 *.log
 
-# Node.js (如果将来使用)
+# Node.js
 node_modules/
 npm-debug.log
 yarn-error.log
-package-lock.json
 yarn.lock
+
+# 注意：package-lock.json 需提交，GitHub Actions 的 npm ci 依赖它锁定版本
+# 之前被忽略会导致 CI 每次装到不同的 playwright 版本
 
 # Chrome Extension 打包文件
 *.zip
@@ -48,3 +50,8 @@ docs/
 
 # e2e / 分析脚本产物
 analysis-output/
+
+# 仅为方便本地跳转而建的软链接（真实文件在 scripts/ 和 .github/workflows/）
+/checkin.mjs
+/checkin.yml
+/diagnose-post.mjs
