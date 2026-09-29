@@ -65,8 +65,17 @@ jobs:
           npx playwright install chromium --with-deps
 
       - name: 执行签到
+        id: checkin
         env:
           # 从 Secret 注入；不要用 set -x 或 echo，否则 Cookie 会进日志
           JUEJIN_COOKIE: ${{ secrets.JUEJIN_COOKIE }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: node scripts/checkin.mjs ${{ inputs.dry_run && '--dry-run' || '' }}
+        # 签到失败时以自定义摘要收尾，方便在通知邮件/Red 状态栏一眼看清原因
+        run: |
+          if node scripts/checkin.mjs ${{ inputs.dry_run && '--dry-run' || '' }}; then
+            echo "结论=正常" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "结论=失败" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=签到失败::请看上方日志。Cookie 失效时需更新 Settings → Secrets and variables → Actions → JUEJIN_COOKIE"
+            exit 1
+          fi
