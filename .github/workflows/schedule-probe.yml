@@ -16,4 +16,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 记录触发
-        run: echo "probe triggered: event=${{ github.event_name }} at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        run: |
+          echo "probe: event=${{ github.event_name }} at $(date -u)"
