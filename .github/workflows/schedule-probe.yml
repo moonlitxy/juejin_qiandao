@@ -1,0 +1,19 @@
+# 临时诊断：验证本仓库的 schedule 触发是否可用。查清原因后删除。
+# 背景：checkin.yml 的 cron 从未触发（schedule 事件 run 数为 0），
+# 但 workflow_dispatch 手动触发正常，故用独立文件隔离「仓库级」与「文件级」问题。
+name: schedule-probe
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 记录触发
+        run: echo "probe triggered: event=${{ github.event_name }} at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
