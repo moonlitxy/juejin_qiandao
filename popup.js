@@ -6,8 +6,12 @@ const elements = {
     statusIcon: null,
     statusTitle: null,
     statusDesc: null,
+    lotterySection: null,
+    lotteryIcon: null,
+    lotteryText: null,
     consecutiveDays: null,
     totalDays: null,
+    currentPoint: null,
     lastCheckInTime: null,
     manualCheckInBtn: null,
     openJuejinBtn: null,
@@ -31,8 +35,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.statusIcon = document.getElementById('statusIcon');
     elements.statusTitle = document.getElementById('statusTitle');
     elements.statusDesc = document.getElementById('statusDesc');
+    elements.lotterySection = document.getElementById('lotterySection');
+    elements.lotteryIcon = document.getElementById('lotteryIcon');
+    elements.lotteryText = document.getElementById('lotteryText');
     elements.consecutiveDays = document.getElementById('consecutiveDays');
     elements.totalDays = document.getElementById('totalDays');
+    elements.currentPoint = document.getElementById('currentPoint');
     elements.lastCheckInTime = document.getElementById('lastCheckInTime');
     elements.manualCheckInBtn = document.getElementById('manualCheckInBtn');
     elements.openJuejinBtn = document.getElementById('openJuejinBtn');
@@ -53,6 +61,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 否则会误显示"未签到"
     syncCheckInStatusFromServer();
 
+    // 当前矿石总数（实时查询服务端）
+    updateCurrentPoint();
+
     // 监听来自background的消息（签到完成后更新状态）
     // background 现在成功和失败都会广播 checkInCompleted，UI 以它为准
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -68,6 +79,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             loadConfig().then(config => {
                 updateCheckInStatus(config);
             });
+
+            // 签到 / 抽奖可能改变矿石总数，刷新一次
+            updateCurrentPoint();
         }
     });
 });
@@ -178,6 +192,9 @@ function updateCheckInStatus(config) {
         // 更新统计信息
         updateStatistics(config);
 
+        // 更新抽奖结果行（当天有结果才显示）
+        updateLotteryStatus(config);
+
     } catch (error) {
         console.error('更新签到状态失败:', error);
         updateStatus('error', '状态未知', '无法获取签到状态');
@@ -208,6 +225,40 @@ function updateStatistics(config) {
     }
 
     elements.totalDays.textContent = totalDays;
+}
+
+// 渲染抽奖结果行（只在当天抽中时显示；跳过/失败不占位，避免噪声）
+function updateLotteryStatus(config) {
+    const section = elements.lotterySection;
+    const record = config && config.lotteryResult;
+
+    const isTodayWin = record
+        && record.status === 'won'
+        && new Date(record.date).toDateString() === new Date().toDateString();
+
+    if (!isTodayWin) {
+        section.hidden = true;
+        return;
+    }
+
+    section.hidden = false;
+    elements.lotteryIcon.className = 'lottery-icon';
+    elements.lotteryIcon.textContent = '🎁';
+    elements.lotteryText.textContent = record.prizeName
+        ? `抽中：${record.prizeName}`
+        : (record.message || '抽奖成功');
+}
+
+// 更新当前矿石总数（实时查询服务端，与掘金网站显示一致）
+// 签到 / 抽奖后服务端点数已更新，再查即为最新
+async function updateCurrentPoint() {
+    try {
+        const response = await sendMessage({ action: 'getCurrentPoint' });
+        elements.currentPoint.textContent = response && response.ok ? response.point : '-';
+    } catch (error) {
+        console.error('获取当前矿石失败:', error);
+        elements.currentPoint.textContent = '-';
+    }
 }
 
 // 更新上次签到时间

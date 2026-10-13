@@ -346,7 +346,7 @@ async function runCheckInAttempt(state) {
     // 处理签到结果（包括重复签到的情况）
     let result;
     if (response && (response.success || response.alreadyCheckedIn)) {
-        result = await finalizeCheckInSuccess(response, config);
+        result = await finalizeCheckInSuccess(response, config, tabId);
     } else {
         // content.js 报告失败时，也不能直接判死：先 API 验证，再 API 直签。
         // 原因：内容脚本在隔离世界，跨域 POST 会被 CORS 拦截，只有 background
@@ -392,22 +392,37 @@ async function testContentScriptReady(tabId) {
     return false;
 }
 
-// 签到成功统一处理：更新历史、展示通知、广播给 popup，并返回结果
-async function finalizeCheckInSuccess(result, config) {
+// 签到成功统一处理：更新历史、自动抽奖、展示通知、广播给 popup，并返回结果
+async function finalizeCheckInSuccess(result, config, tabId = null) {
     // 传递已读取的 config，避免重复读取存储
     await updateCheckInHistory(result, config);
     // 连续签到天数以服务端为准（本地推算可能有偏差；断签由服务端重置）
     await syncConsecutiveDaysFromServer();
     // 本月签到天数同样以服务端为准（此刻今日已签到，故传 true）
     await syncMonthCountFromServer(true);
+
     const message = result.alreadyCheckedIn ?
         (result.message || '今天已经签到过了') :
         (result.message || '掘金签到完成！');
+
+    // 先播报签到终态，不把抽奖的网络耗时压在签到关键路径上
     notifySuccess(message, config);
-    broadcastCheckInResult(result);
+    broadcastCheckInResult({ ...result, success: true, message });
+
+    // 自动抽奖：仅在拿到存活标签页时执行；best-effort，失败或跳过都不影响签到结果
+    let lottery = null;
+    if (config?.autoLottery !== false && typeof tabId === 'number') {
+        lottery = await runLottery(tabId);
+        await saveLotteryResult(lottery);
+
+        // 抽到奖品或抽奖失败时补一次广播，让已打开的 popup 刷新抽奖行
+        if (lottery.status === 'won' || lottery.status === 'failed') {
+            broadcastCheckInResult({ ...result, success: true, message, lottery });
+        }
+    }
 
     // 回传结果，供 performCheckIn / manualCheckIn 使用
-    return { ...result, success: true, message };
+    return { ...result, success: true, message, lottery };
 }
 
 // 签到失败统一处理：通知、广播、关闭标签页，并返回结果
@@ -426,11 +441,37 @@ function finalizeCheckInFailure(message, config, tabId) {
 async function finalizeIfApiVerified(apiResult, config, tabId) {
     if (apiResult.success || apiResult.alreadyCheckedIn) {
         console.log('✅ API 确认：签到已成功！');
-        const result = await finalizeCheckInSuccess(apiResult, config);
+        const result = await finalizeCheckInSuccess(apiResult, config, tabId);
         chrome.tabs.remove(tabId);
         return result;
     }
     return null;
+}
+
+// 查询当前矿石总数（GET，SW 内直接 fetch 即可）
+// 服务端返回 data 直接是数字；未登录返回 err_no:403
+// 返回 { ok, point, message }
+async function fetchCurrentPointFromServer() {
+    try {
+        const response = await fetch('https://api.juejin.cn/growth_api/v1/get_cur_point', {
+            method: 'GET',
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            return { ok: false, message: `HTTP ${response.status}` };
+        }
+
+        const data = await response.json();
+        if (data.err_no !== 0) {
+            return { ok: false, message: data.err_msg || `err_no: ${data.err_no}` };
+        }
+
+        const point = Number(data.data);
+        return { ok: true, point: Number.isFinite(point) ? point : 0 };
+    } catch (error) {
+        return { ok: false, message: error.message };
+    }
 }
 
 // 从 background 直接查询服务端今日签到状态（不依赖任何标签页）
@@ -513,11 +554,20 @@ async function syncConsecutiveDaysFromServer() {
     return true;
 }
 
-// 查询本月签到天数（服务端 get_by_month 返回整月 {date, status, point}）
-// status: 3=已签到, 2=漏签, 4=未来; 今天的记录单独用 status 表示（线上为 1），
-// 故今天是否算作已签由 checkedIn 参数决定（来自 get_today_status，最权威）
-async function fetchMonthCheckInCountFromServer(checkedIn) {
+// 查询本月签到明细（服务端 get_by_month 返回整月 {date, status, point}）
+// status: 3=已签到, 2=漏签, 4=未来; 今天的记录是独立 status（线上为 1），
+// 故今天是否算作已签由 checkedIn 决定（来自 get_today_status，最权威）。
+// checkedIn 传 null 表示未知，本函数会自行查询一次 get_today_status。
+// 返回 { ok, month, today, checkedIn, monthCount, days:[{date, day, checked, miss, future, today, point}] }
+async function fetchMonthDetailFromServer(checkedIn = null) {
     try {
+        // 今天是否已签（get_by_month 里今天的状态不可靠，必须单独判定）
+        let todayCheckedIn = checkedIn;
+        if (todayCheckedIn === null) {
+            const status = await fetchTodayCheckInFromServer();
+            todayCheckedIn = status.ok && status.checkedIn === true;
+        }
+
         const response = await fetch('https://api.juejin.cn/growth_api/v1/get_by_month', {
             method: 'GET',
             credentials: 'include'
@@ -537,24 +587,52 @@ async function fetchMonthCheckInCountFromServer(checkedIn) {
         const todayKey = keyOf(now);
         const monthKey = todayKey.slice(0, 7);
 
+        const days = [];
         let count = 0;
-        let todayCounted = false;
         for (const row of data.data) {
-            if (row.status !== 3) continue;
-            const key = keyOf(new Date(row.date * 1000));
+            const rowDate = new Date(row.date * 1000);
+            const key = keyOf(rowDate);
             if (!key.startsWith(monthKey)) continue;
-            count++;
-            if (key === todayKey) todayCounted = true;
+
+            const isToday = key === todayKey;
+            const isFuture = key > todayKey;
+            // 今天以 get_today_status 为准，其余按 status===3 判定
+            const checked = isToday ? todayCheckedIn : row.status === 3;
+            if (checked) count++;
+
+            days.push({
+                date: key,
+                day: rowDate.getDate(),
+                checked,
+                miss: !checked && !isFuture && !isToday,
+                future: isFuture,
+                today: isToday,
+                point: typeof row.point === 'number' ? row.point : 0
+            });
         }
 
-        if (!todayCounted && checkedIn === true) {
-            count++;
-        }
+        days.sort((a, b) => (a.date < b.date ? -1 : 1));
 
-        return { ok: true, month: monthKey, count };
+        return {
+            ok: true,
+            month: monthKey,
+            today: todayKey,
+            checkedIn: todayCheckedIn,
+            monthCount: count,
+            days
+        };
     } catch (error) {
         return { ok: false, message: error.message };
     }
+}
+
+// 本月签到天数：复用上面的明细统计，保持原有返回结构 { ok, month, count }
+async function fetchMonthCheckInCountFromServer(checkedIn) {
+    const detail = await fetchMonthDetailFromServer(checkedIn);
+    if (!detail.ok) {
+        return detail;
+    }
+    return { ok: true, month: detail.month, count: detail.monthCount };
 }
 
 // 用服务端数据刷新本月签到天数（跨月时 month 变化也会触发更新）
@@ -748,6 +826,294 @@ async function attemptCheckInViaApi(tabId) {
     }
 }
 
+// ===== 抽奖（签到成功后自动用掉当天免费抽奖机会）=====
+
+// 查询今日免费抽奖剩余次数
+// 必须走页面主世界（world:'MAIN'）：在 SW 里直接请求该接口会拿到空响应体
+//（response.json() 抛 "Unexpected end of JSON input"），页面上下文带 referer 才正常，
+// 与抽奖 POST 同理。
+// 返回 { ok, freeCount, message }
+async function fetchLotteryConfigViaApi(tabId) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            world: 'MAIN',
+            func: async () => {
+                try {
+                    const response = await fetch('https://api.juejin.cn/growth_api/v1/lottery_config/get', {
+                        method: 'GET',
+                        credentials: 'include'
+                    });
+
+                    if (!response.ok) {
+                        return { ok: false, message: `HTTP ${response.status}` };
+                    }
+
+                    // 先取 text 再解析：异常时响应体可能为空，直接 response.json() 会抛错
+                    const text = await response.text();
+                    if (!text) {
+                        return { ok: false, message: '接口返回空响应' };
+                    }
+
+                    let data;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (e) {
+                        return { ok: false, message: '响应不是合法 JSON' };
+                    }
+
+                    console.log('📋 抽奖配置响应:', JSON.stringify(data));
+                    if (data.err_no !== 0 || !data.data) {
+                        return { ok: false, message: data.err_msg || `err_no: ${data.err_no}` };
+                    }
+
+                    // 免费次数字段以 free_count 为主，其余为兼容兜底
+                    const raw = data.data.free_count ?? data.data.free_time ?? data.data.lottery_free_count;
+                    const freeCount = Number.isFinite(Number(raw)) ? Number(raw) : 0;
+                    return { ok: true, freeCount };
+                } catch (error) {
+                    return { ok: false, message: error.message };
+                }
+            }
+        });
+
+        if (results && results[0] && results[0].result) {
+            return results[0].result;
+        }
+        return { ok: false, message: '查询抽奖次数无响应' };
+    } catch (error) {
+        return { ok: false, message: error.message };
+    }
+}
+
+// 通过 API 抽奖
+// world:'MAIN' 很关键：内容脚本所在隔离世界的跨域 POST 会被 CORS 拦截，
+// 必须在页面主世界执行才能真正抽奖成功（与 attemptCheckInViaApi 同理）
+// 返回 { success, prizeName?, prizeImage?, lotteryType?, noChance?, message }
+async function attemptLotteryDrawViaApi(tabId) {
+    try {
+        console.log('🎰 尝试使用 API 抽奖...');
+
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            world: 'MAIN',
+            func: async () => {
+                try {
+                    // ?aid=2608 是必需的：不带该参数时服务端返回无 CORS 头的响应，
+                    // 表现为 "Failed to fetch"；aid 是掘金 Web 端固定的应用 id。
+                    // 警告：free_count=0 时该接口会改扣 200 矿石/次，调用前必须确认有免费次数。
+                    const response = await fetch('https://api.juejin.cn/growth_api/v1/lottery/draw?aid=2608', {
+                        method: 'POST',
+                        credentials: 'include'
+                    });
+
+                    if (response.status === 401) {
+                        return { success: false, message: '请先登录掘金账号' };
+                    }
+
+                    if (response.ok) {
+                        // 先取 text 再解析，避免空响应体导致 json() 抛错
+                        const text = await response.text();
+                        if (!text) {
+                            return { success: false, message: '抽奖接口返回空响应' };
+                        }
+                        let data;
+                        try {
+                            data = JSON.parse(text);
+                        } catch (e) {
+                            return { success: false, message: '抽奖响应不是合法 JSON' };
+                        }
+                        console.log('📋 API 抽奖完整响应:', JSON.stringify(data));
+
+                        if (data.err_no === 0 && data.data) {
+                            const prizeName = data.data.lottery_name || '';
+                            return {
+                                success: true,
+                                prizeName: prizeName,
+                                prizeImage: data.data.lottery_image || null,
+                                lotteryType: data.data.lottery_type ?? null,
+                                message: prizeName ? `抽中 ${prizeName}` : '抽奖成功'
+                            };
+                        }
+
+                        // 免费次数已用完
+                        if (data.err_no === 400 || /免费次数|用完|没有.*机会/.test(data.err_msg || '')) {
+                            return { success: false, noChance: true, message: data.err_msg || '免费抽奖次数已用完' };
+                        }
+
+                        return { success: false, message: data.err_msg || `抽奖失败 (err_no: ${data.err_no})` };
+                    }
+
+                    return { success: false, message: `抽奖请求失败 (${response.status})` };
+                } catch (error) {
+                    console.error('API 抽奖异常:', error);
+                    return { success: false, message: `抽奖异常: ${error.message}` };
+                }
+            }
+        });
+
+        if (results && results[0] && results[0].result) {
+            console.log('✅ API 抽奖结果:', results[0].result);
+            return results[0].result;
+        }
+
+        return { success: false, message: 'API 抽奖无响应' };
+    } catch (error) {
+        console.error('❌ API 抽奖失败:', error);
+        return { success: false, message: `API 抽奖失败: ${error.message}` };
+    }
+}
+
+// 抽奖编排：先查免费次数，>0 才抽；没有免费机会就跳过，维持签到成功即可
+// 本函数是 best-effort：任何异常都收敛为失败态，绝不影响签到结果
+// 返回 { status: 'won'|'skipped'|'failed', prizeName, prizeImage, lotteryType, message, freeCount }
+async function runLottery(tabId) {
+    try {
+        const cfg = await fetchLotteryConfigViaApi(tabId);
+        if (!cfg.ok) {
+            return { status: 'failed', prizeName: null, message: `无法查询抽奖次数：${cfg.message}`, freeCount: null };
+        }
+
+        // 关键：没有免费次数绝不调 draw —— 该接口在 free_count=0 时会改扣 200 矿石/次
+        if (!(cfg.freeCount > 0)) {
+            return { status: 'skipped', prizeName: null, message: '今日无免费抽奖机会', freeCount: cfg.freeCount };
+        }
+
+        const draw = await attemptLotteryDrawViaApi(tabId);
+        if (draw.success) {
+            return {
+                status: 'won',
+                prizeName: draw.prizeName || null,
+                prizeImage: draw.prizeImage || null,
+                lotteryType: draw.lotteryType ?? null,
+                message: draw.message,
+                freeCount: cfg.freeCount
+            };
+        }
+
+        if (draw.noChance) {
+            return { status: 'skipped', prizeName: null, message: draw.message, freeCount: cfg.freeCount };
+        }
+
+        // API 抽奖失败（有次数但请求出错）→ 尝试 DOM 兜底
+        try {
+            const domResult = await chrome.tabs.sendMessage(tabId, { action: 'lotteryDraw' });
+            if (domResult && domResult.status) {
+                // 兜底结果优先于 API 的错误消息，保留其诊断信息
+                return {
+                    status: domResult.status,
+                    prizeName: domResult.prizeName || null,
+                    message: domResult.message || draw.message,
+                    freeCount: cfg.freeCount
+                };
+            }
+        } catch (e) {
+            console.log('ℹ️ DOM 抽奖兜底不可用:', e.message);
+        }
+
+        return { status: 'failed', prizeName: null, message: draw.message, freeCount: cfg.freeCount };
+    } catch (error) {
+        return { status: 'failed', prizeName: null, message: `抽奖出错：${error.message}`, freeCount: null };
+    }
+}
+
+// 把 ISO 时间串转成本地日期 key（YYYY-MM-DD），用于按天同步
+function toDateKey(isoString) {
+    const d = new Date(isoString);
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${month}-${day}`;
+}
+
+// 汇总抽奖日志：本机流水 + 其他设备同步来的记录，按天聚合后倒序返回。
+// 同一天优先保留中奖记录（两台设备同一天一台抽中、一台跳过时，以中奖为准）。
+async function fetchLotteryLog() {
+    const storage = await chrome.storage.local.get(['config']);
+    const localHistory = (storage.config && storage.config.lotteryHistory) || [];
+
+    const byDay = new Map();
+    for (const record of localHistory) {
+        const day = toDateKey(record.date);
+        if (!byDay.has(day)) {
+            byDay.set(day, record);
+        }
+    }
+
+    // 合并 chrome.storage.sync 里其他设备的按天记录
+    let synced = {};
+    try {
+        synced = await chrome.storage.sync.get(null);
+    } catch (error) {
+        console.log('ℹ️ 读取同步的抽奖记录失败:', error.message);
+    }
+
+    for (const [key, value] of Object.entries(synced)) {
+        if (!key.startsWith('lottery:') || !value || !value.date) {
+            continue;
+        }
+        const day = key.slice('lottery:'.length);
+        const existing = byDay.get(day);
+        if (!existing) {
+            byDay.set(day, value);
+        } else if (existing.status !== 'won' && value.status === 'won') {
+            byDay.set(day, value);
+        }
+    }
+
+    return [...byDay.values()].sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
+// 把抽奖结果写入 config（lotteryResult 单条 + lotteryHistory 最近90条）
+// 写前必须读全量 config —— storage 是整体替换
+async function saveLotteryResult(lottery) {
+    try {
+        const storage = await chrome.storage.local.get(['config']);
+        const config = { ...DEFAULT_CONFIG, ...(storage.config || {}) };
+
+        const record = {
+            date: new Date().toISOString(),
+            status: lottery.status,
+            prizeName: lottery.prizeName || null,
+            prizeImage: lottery.prizeImage || null,
+            lotteryType: lottery.lotteryType ?? null,
+            message: lottery.message,
+            freeCount: lottery.freeCount ?? null
+        };
+
+        // 同一天已有中奖记录时，别让后续的 skipped / failed 覆盖它
+        const prev = config.lotteryResult;
+        const sameDay = prev && new Date(prev.date).toDateString() === new Date(record.date).toDateString();
+        const keepsPrevWin = sameDay && prev.status === 'won' && record.status !== 'won';
+
+        if (!keepsPrevWin) {
+            config.lotteryResult = record;
+        }
+
+        // 历史仍完整记录每次尝试（含 skipped）
+        config.lotteryHistory = [record, ...(config.lotteryHistory || [])].slice(0, 90);
+
+        await chrome.storage.local.set({ config });
+        console.log('✅ 抽奖结果已保存:', record);
+
+        // 同步到其他设备：按天一个 key，规避 chrome.storage.sync 单项 8KB 限制。
+        // 未登录 Chrome 账号时 sync 退化为本地存储，不会报错。
+        if (config.syncLottery !== false) {
+            try {
+                const syncKey = 'lottery:' + toDateKey(record.date);
+                await chrome.storage.sync.set({ [syncKey]: record });
+                console.log('🔄 抽奖记录已同步:', syncKey);
+            } catch (error) {
+                console.log('ℹ️ 抽奖记录同步失败:', error.message);
+            }
+        }
+
+        return record;
+    } catch (error) {
+        console.error('❌ 保存抽奖结果失败:', error);
+        return null;
+    }
+}
+
 // 等待标签页加载完成（使用事件监听，避免轮询）
 function waitForTabLoaded(tabId, timeout) {
     return new Promise((resolve, reject) => {
@@ -933,10 +1299,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    if (request.action === 'getCurrentPoint') {
+        // 当前矿石总数：实时查询服务端，保证与掘金网站显示一致
+        // （签到 / 抽奖后服务端点数已更新，再查即为最新）
+        fetchCurrentPointFromServer().then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ ok: false, message: error.message });
+        });
+        return true; // 保持消息通道开启
+    }
+
+    if (request.action === 'getLotteryLog') {
+        // 抽奖日志：本机流水 + 其他设备同步来的记录，按天聚合后倒序
+        fetchLotteryLog().then(log => {
+            sendResponse({ ok: true, log });
+        }).catch(error => {
+            sendResponse({ ok: false, message: error.message });
+        });
+        return true; // 保持消息通道开启
+    }
+
     if (request.action === 'getConfig') {
         // 获取配置
         chrome.storage.local.get(['config'], (result) => {
             sendResponse(result);
+        });
+        return true;
+    }
+
+    if (request.action === 'getMonthCheckIn') {
+        // 设置页「签到日历」：返回本月逐日明细（服务端为准）
+        fetchMonthDetailFromServer(null).then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ ok: false, message: error.message });
         });
         return true;
     }

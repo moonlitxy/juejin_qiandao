@@ -27,6 +27,14 @@
             </div>
         </div>
 
+        <!-- 抽奖结果（默认隐藏，仅当天有结果时显示） -->
+        <div class="lottery-section" id="lotterySection" hidden>
+            <div class="lottery-card">
+                <span class="lottery-icon" id="lotteryIcon">🎁</span>
+                <span class="lottery-text" id="lotteryText"></span>
+            </div>
+        </div>
+
         <!-- 签到统计 -->
         <div class="stats-section">
             <div class="stat-item">
@@ -36,6 +44,10 @@
             <div class="stat-item">
                 <div class="stat-value" id="totalDays">0</div>
                 <div class="stat-label">本月签到天数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value compact" id="currentPoint">-</div>
+                <div class="stat-label">当前矿石</div>
             </div>
         </div>
 

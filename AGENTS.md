@@ -4,20 +4,20 @@
 
 ## 如何运行/验证
 
-- **`npm test` 现在跑不通，别慌**：`package.json` 声称执行 `node tests/simulate-checkin-timing.js`，但 `tests/` 从未被提交（git 历史里只有过 `tests/images/image.png`），执行必然 `MODULE_NOT_FOUND`。这是仓库缺测试文件，不是你改坏了代码。该文件恢复前，改 `content.js` 等待/轮询逻辑只能靠真机验证。
+- 测试：`npm test` 跑 `tests/simulate-checkin-timing.js`（约 6 秒，无第三方依赖），用 vm 沙箱 + 假 DOM/fetch 跑 `content.js`，7 个场景并发断言签到验证链最坏耗时 ≤ 8000ms；`npm run test:ab` 与 git HEAD 旧版做 A/B 对比（仅供观察）；`npm run test:lottery` 跑 `tests/simulate-lottery.js`（约 1 秒），校验 background 的抽奖门禁（无免费次数不抽）与落库行为。改 `content.js` 等待/轮询逻辑后必须跑 `npm test`，改抽奖逻辑后跑 `test:lottery`。注意 `tests/` 目前尚未纳入 git 跟踪（`git status` 显示 `?? tests/`）。
 - 真机端到端验证：`node e2e-checkin.js`。Playwright 用命令行 `--load-extension` 把本插件加载进**独立临时 profile**（不经过 `chrome://extensions` 的开发者模式），跑 `manualCheckIn` 并断言 popup 文案。前置：`npm install` + `npx playwright install chromium`。**必须用 Playwright 自带 Chromium**：本机 Chrome 152+ 已彻底禁用命令行 `--load-extension`（`chrome://extensions` 里看不到任何扩展，加 `--disable-features=DisableLoadExtensionCommandLineSwitch` 也无效）。首次运行需在弹出窗口登录掘金，登录态持久化在 `$TMPDIR/juejin-qiandao-e2e-profile`。
 - **复用 Playwright profile 的 hidden 坑**：Chrome 会缓存扩展的 service worker 脚本，改完 `background.js` 重启仍是旧代码；而 `content.js` 会正常更新，极易误判"改了没用"。脚本已在启动前删掉 `Default/Service Worker`、`Default/Extension Scripts`（登录态不受影响）。手动调试时若 background 行为诡异，先怀疑这个。
 - 真机验证：`chrome://extensions` 开开发者模式 → **Load unpacked** 加载仓库根目录。改代码后必须点刷新；改 `background.js` 还要在扩展页 terminate 并重载 service worker，否则跑的还是旧逻辑。
 - 反查掘金真实 DOM：`node analyze-juejin.js`（先 `npm install`；`playwright` 是本仓唯一依赖，仅此处用，扩展运行时无依赖）。输出到 `analysis-output/`，结果受页面结构/登录态影响。
 - 强制触发签到：浏览器控制台执行 `chrome.runtime.sendMessage({ action: 'manualCheckIn' })`（background 日志在 `chrome://extensions` 的 Service Worker 处看）。
-- 版本号以 `manifest.json`（1.0.1）为准，`package.json` 仍停在 1.0.0。
+- 版本号以 `manifest.json` 为准（1.0.1），`package.json` 已同步为 1.0.1。
 
 ## 架构与协议（易踩坑点）
 
 - 三层：`background.js`（service worker，无持久后台，靠 `importScripts('shared/config.js')` 复用配置）↔ `content.js`（注入掘金页，执行点击）。定时只能用 **Alarms API**（`dailyCheckIn` / `checkInRetry`），禁止 `setInterval`。
 - **签到入口已迁到沸点页 `/pins`**：background 直接打开 `https://juejin.cn/pins` 而不是旧的 checkin 页。`background.js` 和 `content.js` **各有一份** `isCheckInPageUrl()`，都把 `pins|task|signin` 视为可签到页，改判定标准时两处必须同步。按钮找不到时走 API 兜底，别再死磕 DOM 选择器。
 - `shared/` 无模块化、无 bundle，靠全局变量通信：`content_scripts` 顺序（先 `shared/config.js` 后 `content.js`）、popup/options 的 HTML `<script>` 顺序、service worker 的 `importScripts`。新增 shared 脚本必须同步加进对应引入处。注意 `messaging.js` / `notification.js` **仅 popup/options 可用**，content/background 用不了。
-- action 清单（改名时三处同步）：background→content 为 `ping`/`checkIn`；popup/options→background 经 `sendMessage` 发 `getConfig` / `updateConfig` / `manualCheckIn` / `syncCheckInStatus`；background→popup 广播 `{action:'checkInCompleted', result}`。
+- action 清单（改名时三处同步）：background→content 为 `ping`/`checkIn`/`lotteryDraw`（后者仅在 API 抽奖失败且有免费次数时触发）；popup/options→background 经 `sendMessage` 发 `getConfig` / `updateConfig` / `manualCheckIn` / `syncCheckInStatus` / `getMonthCheckIn`；background→popup 广播 `{action:'checkInCompleted', result}`。
 - popup 的签到状态**以本地 `config.lastCheckInDate` 为准**（`popup.js` 的 `updateCheckInStatus` 只比 `=== 今天`），所以网页签到 / 多设备 / 重装后本地无记录会误显示"未签到"。为此 popup 打开时会调 `syncCheckInStatus`，由 background 直接 `fetch` 服务端（SW 里带 cookie 是通的），已签到则用 `updateCheckInHistory` 补写本地再刷新 UI；本地已有记录则直接返回，不会重复写历史。
 - `manualCheckIn` 返回 `{success, alreadyCheckedIn?, pending?, skipped?, message}`。`pending` 表示已转入 alarms 重试，popup 须保持"签到中"并等 `checkInCompleted` 广播（成功失败都会广播，UI 以广播为准，不以单次响应定生死）。`enabled:false` 只拦截定时触发，手动签到始终放行。
 - `updateConfig` 是**合并语义**（`{...DEFAULT_CONFIG, ...已存, ...传入}`），调用方可只传部分字段；不要改成整体覆盖，否则会抹掉 `lastCheckInDate` / `checkInHistory` / `consecutiveDays`。
@@ -46,5 +46,7 @@
   - 连续天数：`GET growth_api/v1/get_counts` 的 `cont_count`（即网站"连续签到 N 天"，`sum_count` 为累计天数），断签由服务端自行重置。
   - 本月天数：`GET growth_api/v1/get_by_month`（整月 `{date, status, point}`）。`status`: **3=已签到**、2=漏签、4=未来；**今天的记录是独立 status（线上为 1）**，是否算已签要用 `get_today_status` 的 `check_in_done` 判定，不能只看 `status===3`。
   - `syncConsecutiveDaysFromServer()` / `syncMonthCountFromServer()` 会覆盖本地值（popup 用 `monthCheckInMonth==='YYYY-MM'` 判断是否可用）。**注意调用顺序**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则会被本地的 0 冲掉。
+- **签到成功后自动抽奖**：`finalizeCheckInSuccess` 先播报签到终态（通知 + 广播），再 `runLottery(tabId)`——查 `free_count`，>0 才抽，否则跳过。**两个抽奖接口都必须 `world:'MAIN'`**：`lottery_config/get` 在 SW 里直接 fetch 只拿到空响应体（`json()` 抛 "Unexpected end of JSON input"）；`lottery/draw` 还必须**带 `?aid=2608`**（掘金 Web 端固定 app id），否则表现为 `Failed to fetch`。**`free_count=0` 时 draw 会改扣 200 矿石/次**，所以无免费次数时绝不调 draw（`runLottery` 直接返回 `skipped`）。抽奖全程 best-effort，不影响签到结果。`autoLottery:false` 可关闭。
+- **抽奖记录留存与同步**：本机流水存 `config.lotteryHistory`（最近90条，含 skipped/failed）。开启 `syncLottery` 时抽奖后额外写 `chrome.storage.sync` 的 `lottery:YYYY-MM-DD`（按天一个 key，绕开 sync 单项 8KB 限制；未登录 Chrome 账号时 sync 退化为本地存储）。设置页用 `getLotteryLog` 取「本机 ∪ 同步」按天聚合（同一天优先 `won`），渲染成可翻月的抽奖日历；**签到日历无法跨月**——`get_by_month` 不接受月份参数（实测多种写法返回同一段数据），历史月份服务端不提供。**注意掘金没有个人抽奖记录接口**：`lottery_history/*` 走 `msToken`/`a_bogus` 签名，手动请求一律 `err_no:2 请求路由不存在`，所以网页手动抽的奖拿不到、也同步不了。
 - **`.gitignore` 里有 `docs/`**，但现有文档都是当初 `git add -f` 强塞进去的。新增/修改 `docs/` 下的文件必须用 `git add -f`，否则静默被忽略。
 - 注释多为中文，保持现有命名与注释习惯。

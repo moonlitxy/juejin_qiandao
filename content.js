@@ -16,6 +16,11 @@ const CLAIM_BUTTON_BUDGET_MS = 1200;  // 等待"领取矿石"按钮出现的预�
 const VERIFY_BUDGET_MS = 4500;        // 签到结果验证总预算
 const VERIFY_INTERVAL_MS = 700;       // 每轮验证的间隔
 const VERIFY_API_EVERY = 2;           // 每 N 轮才调一次状态 API（API 较慢，避免频繁请求）
+// 抽奖（签到成功后自动消耗免费抽奖机会）的时间预算，仅 DOM 兜底路径使用
+const LOTTERY_BUTTON_BUDGET_MS = 1500;  // 等待"免费抽奖"/"去抽奖"按钮出现的预算
+const LOTTERY_RESULT_BUDGET_MS = 3000;  // 点击后等待中奖文案的预算
+const LOTTERY_RESULT_INTERVAL_MS = 500; // 抽奖结果轮询间隔
+const LOTTERY_CLICKABLE_SELECTOR = 'button, .btn, a, [class*="button"]'; // 抽奖相关可点击元素
 
 // 签到页 URL 识别：签到入口已挪到沸点页（/pins），签到不再只发生在
 // checkin/lottery 页，pins（及 task/sigin 相关页）同样视为可直接执行签到的页面
@@ -42,6 +47,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }).catch(error => {
             console.error('❌ 签到执行出错:', error);
             sendResponse({ success: false, message: error.message });
+        });
+        return true; // 保持消息通道开启
+    }
+
+    // 抽奖 DOM 兜底：仅当 API 抽奖失败且确认有免费次数时由 background 触发
+    if (request.action === 'lotteryDraw') {
+        performLottery().then(result => {
+            console.log('🎰 抽奖 DOM 兜底完成:', result);
+            sendResponse(result);
+        }).catch(error => {
+            console.error('❌ 抽奖 DOM 兜底出错:', error);
+            sendResponse({ status: 'failed', message: error.message });
         });
         return true; // 保持消息通道开启
     }
@@ -1014,6 +1031,138 @@ function findClaimButton() {
 
     console.log('未找到领取矿石按钮');
     return null;
+}
+
+// ===== 抽奖 DOM 兜底 =====
+// 仅在 API 抽奖失败、且已确认有免费次数时由 background 触发。
+// 目标是点掉页面上的「免费抽奖一次」；没有免费入口就返回 skipped。
+
+// 查找可直接点击的"免费抽奖"按钮（弹窗内）
+function findFreeLotteryButton() {
+    const patterns = ['免费抽奖', '免费抽一次', '抽奖一次', '抽一次'];
+    const nodes = document.querySelectorAll(LOTTERY_CLICKABLE_SELECTOR);
+    for (const el of nodes) {
+        const text = (el.textContent || '').trim();
+        // 排除空文本、大容器与"明日再来"之类
+        if (!text || text.length > 20 || text.includes('明日')) {
+            continue;
+        }
+        for (const pattern of patterns) {
+            if (text.includes(pattern)) {
+                console.log(`找到免费抽奖按钮: ${text}`);
+                return el;
+            }
+        }
+    }
+    return null;
+}
+
+// 查找"去抽奖"入口（可能需要点击触发弹窗，或本身是跳转链接）
+function findGoToLotteryButton() {
+    const nodes = document.querySelectorAll(LOTTERY_CLICKABLE_SELECTOR);
+    for (const el of nodes) {
+        const text = (el.textContent || '').trim();
+        if (!text || text.length > 20) {
+            continue;
+        }
+        if (text.includes('去抽奖') || text.includes('立即抽奖')) {
+            return el;
+        }
+    }
+    return null;
+}
+
+// 采集页面上所有"疑似中奖文案"的短文本，用于点击前后 diff
+function collectLotteryTexts() {
+    const selectors = ['.modal', '.popup', '.toast', '.message', '[role="alert"]', '[class*="prize"]'];
+    const texts = new Set();
+    for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+            const text = (el.textContent || '').trim();
+            if (text && text.length <= 100) {
+                texts.add(text);
+            }
+        }
+    }
+    return texts;
+}
+
+// 从点击后「新出现」的文本里筛出中奖文案，避免把静态面板文本误判为中奖
+function readNewLotteryPrizeText(before) {
+    const patterns = ['恭喜', '抽中', '获得', '奖品'];
+    for (const text of collectLotteryTexts()) {
+        if (before.has(text)) {
+            continue;
+        }
+        for (const pattern of patterns) {
+            if (text.includes(pattern)) {
+                return text;
+            }
+        }
+    }
+    return '';
+}
+
+// 抽奖 DOM 兜底：等按钮出现 → 点击 → 轮询中奖文案
+// 返回 { status: 'won'|'skipped'|'failed', prizeName?, message }
+async function performLottery() {
+    console.log('===== 开始执行抽奖（DOM 兜底）=====');
+
+    // 在预算内等待按钮出现（弹窗可能延迟渲染）
+    const buttonDeadline = Date.now() + LOTTERY_BUTTON_BUDGET_MS;
+    let button = null;
+    for (;;) {
+        button = findFreeLotteryButton();
+        if (button || Date.now() >= buttonDeadline) {
+            break;
+        }
+        await delay(300);
+    }
+
+    // 没有"免费抽奖"按钮 → 看是否有"去抽奖"入口，点一下再找
+    if (!button) {
+        const goButton = findGoToLotteryButton();
+        if (goButton) {
+            console.log('找到"去抽奖"入口，点击尝试打开抽奖界面');
+            try {
+                goButton.click();
+            } catch (e) {
+                console.warn('点击"去抽奖"失败:', e);
+            }
+            await delay(LOTTERY_RESULT_INTERVAL_MS);
+            button = findFreeLotteryButton();
+        }
+    }
+
+    // 仍找不到免费入口：没有免费机会，跳过（维持签到成功）
+    if (!button) {
+        console.log('ℹ️ 未找到免费抽奖入口，跳过抽奖');
+        return { status: 'skipped', message: '未找到免费抽奖入口' };
+    }
+
+    // 记录点击前的文本基线，点击后只认新出现的文案
+    const before = collectLotteryTexts();
+
+    console.log('找到免费抽奖按钮，执行点击');
+    try {
+        button.click();
+    } catch (e) {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    }
+
+    // 轮询中奖文案
+    const resultDeadline = Date.now() + LOTTERY_RESULT_BUDGET_MS;
+    while (Date.now() < resultDeadline) {
+        const prizeText = readNewLotteryPrizeText(before);
+        if (prizeText) {
+            console.log(`🎁 读取到中奖文案: ${prizeText}`);
+            return { status: 'won', prizeName: prizeText, message: prizeText };
+        }
+        await delay(LOTTERY_RESULT_INTERVAL_MS);
+    }
+
+    console.log('⚠️ 已点击抽奖但未读到中奖文案');
+    return { status: 'failed', message: '抽奖已点击但未读到中奖文案' };
 }
 
 // 页面加载完成后自动执行（可选）

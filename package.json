@@ -1,11 +1,12 @@
 {
     "name": "juejin-qiandao-extension",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "掘金自动签到浏览器插件",
     "main": "background.js",
     "scripts": {
         "test": "node tests/simulate-checkin-timing.js",
-        "test:ab": "AB=1 node tests/simulate-checkin-timing.js"
+        "test:ab": "node tests/simulate-checkin-timing.js --ab",
+        "test:lottery": "node tests/simulate-lottery.js"
     },
     "keywords": [
         "juejin",
