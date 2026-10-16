@@ -55,3 +55,7 @@ analysis-output/
 /checkin.mjs
 /checkin.yml
 /diagnose-post.mjs
+
+# 扩展签名私钥：manifest.json 里的 key 是它的公钥，用于固定扩展 ID（跨设备同步依赖）。
+# 私钥只在打包 .crx 时用，绝不提交；公钥已内联在 manifest.json，克隆仓库即可复用同一 ID。
+.keys/

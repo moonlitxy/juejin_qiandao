@@ -3,6 +3,7 @@
     "name": "掘金自动签到",
     "version": "1.0.1",
     "description": "自动完成掘金技术博客网站的每日签到",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoR4YXKIQfI8kZjf5aoSnCU9Ap8M+2CtN+LJv8KQiocTe1MxBXVe1hl37qS90nfZkZWNAjrbVpabmbFIjIdDPykSkQGvj35hn/DOUR5qkiyXrV82AfB1SWJ1rsmq7tfZhdfe4myMLju5l83BZEB1lAWlOMl/DZzp4NBikN89BG4S7BKBgBDhXyvQmZBIeAHqsyGKNJReCNuZ7n4GbTbu0f/3T0NLAs8d/3dXnat+hOrOXwNg6nlk+mCFt8ObemhDOGUNuPMQH+QlSdkjKgR8/PvajLbZ+8svWjwr38Lz1zOhS5jim5g4C/IkrKGW0ub7dwbnvHySMAUOIk9dKXdjW/wIDAQAB",
     "permissions": [
         "storage",
         "alarms",
