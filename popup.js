@@ -29,6 +29,10 @@ let manualCheckInTimeoutId = null;
 // 超时后恢复按钮，避免永远卡在"签到中..."
 const MANUAL_CHECKIN_TIMEOUT = 90000;
 
+// 签到时间输入的保存防抖（毫秒）：input 事件每次改值都会触发，合并后再提交
+const TIME_SAVE_DEBOUNCE = 400;
+let timeSaveTimerId = null;
+
 // 初始化
 document.addEventListener('DOMContentLoaded', async () => {
     // 获取DOM元素
@@ -104,13 +108,34 @@ function bindEventListeners() {
     });
 
     // 签到时间输入
-    elements.checkInTime.addEventListener('change', async (event) => {
-        await updateConfig({ checkInTime: event.target.value });
-    });
+    // 只监听 change 会漏掉粘贴、方向键微调等不触发 change 的改动，故 input + change 都接，
+    // 用防抖合并；空值（输入过程中被清空）不提交，等用户选定完整时间再说。
+    const saveCheckInTime = (event) => {
+        const value = event.target.value;
+        if (!value) {
+            return;
+        }
+        clearTimeout(timeSaveTimerId);
+        timeSaveTimerId = setTimeout(() => {
+            updateConfig({ checkInTime: value });
+        }, TIME_SAVE_DEBOUNCE);
+    };
+    elements.checkInTime.addEventListener('input', saveCheckInTime);
+    elements.checkInTime.addEventListener('change', saveCheckInTime);
 
     // 打开设置页面
     elements.optionsBtn.addEventListener('click', () => {
         chrome.runtime.openOptionsPage();
+    });
+
+    // 外部改配置（设置页保存、后台统计同步）时实时回显：
+    // 弹窗开着期间在设置页改了签到时间 / 开关，这里要跟着变
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.config && changes.config.newValue) {
+            const config = changes.config.newValue;
+            elements.autoCheckInToggle.checked = config.enabled !== false;
+            elements.checkInTime.value = config.checkInTime || '09:00';
+        }
     });
 }
 
@@ -369,14 +394,14 @@ function finishManualCheckIn(result) {
 }
 
 // 更新配置
+// 只提交改动字段：background 的 updateConfig 会与已存配置合并。
+// 不要先 getConfig 再整体写回——弹窗打开时 background 正在并行写
+// lastCheckInDate / consecutiveDays / lotteryHistory 等，整体写回会用旧快照冲掉它们。
 async function updateConfig(updates) {
     try {
-        const response = await sendMessage({ action: 'getConfig' });
-        const config = { ...response.config, ...updates };
-
         await sendMessage({
             action: 'updateConfig',
-            config: config
+            config: updates
         });
 
         showSuccess('设置已保存');

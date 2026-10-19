@@ -6,6 +6,16 @@
 // 路径相对于扩展根目录。
 importScripts('shared/config.js');
 
+// 过点未签巡查闹钟：周期与单次补签的重试上限（分钟）
+const MISSED_CHECK_IN_ALARM = 'missedCheckInWatch';
+const MISSED_CHECK_IN_INTERVAL_MIN = 30;
+const PENDING_CHECK_IN_RETRY_MIN = 10;
+
+// 当前正在执行的签到流程（'auto' / 'manual'）。
+// 只在 service worker 存活期间有意义；SW 被终止后流程也随之结束。
+// 作用：签到已转入 checkInRetry 重试时，过点巡查不要另起一次签到去抢同一个页面。
+let pendingCheckInTrigger = null;
+
 // 签到页 URL 识别：签到入口已挪到沸点页（/pins），与 content.js 的
 // isCheckInPageUrl 保持一致，改动时两处同步
 function isCheckInPageUrl(url) {
@@ -17,14 +27,14 @@ function isCheckInPageUrl(url) {
 chrome.runtime.onInstalled.addListener(async () => {
     console.log('掘金签到插件已安装');
 
-    // 保存默认配置到存储
+    // 保存默认配置到存储（await 保证回调完成后再读，避免下面读到旧状态）
     await chrome.storage.local.get(['config'], (result) => {
         if (!result.config) {
             chrome.storage.local.set({ config: DEFAULT_CONFIG });
         }
     });
 
-    // 创建每日定时签到闹钟
+    // 创建每日定时签到闹钟（含过点未签的补签巡查）
     setupDailyAlarm();
 });
 
@@ -43,8 +53,51 @@ function setupDailyAlarm() {
             periodInMinutes: 24 * 60  // 每24小时重复一次
         });
 
+        // 过点未签巡查：过签到点后每 30 分钟检查一次，没签就补，直到签上为止。
+        // 闹钟在浏览器关闭时不触发，启动时由 onStartup 补建。
+        if (config.enabled === false) {
+            chrome.alarms.clear(MISSED_CHECK_IN_ALARM);
+        } else {
+            chrome.alarms.create(MISSED_CHECK_IN_ALARM, {
+                delayInMinutes: MISSED_CHECK_IN_INTERVAL_MIN,
+                periodInMinutes: MISSED_CHECK_IN_INTERVAL_MIN
+            });
+        }
+
         console.log(`已设置每日签到时间: ${checkInTime}`);
     });
+}
+
+// 今天设定的签到时间；时间非法时回退默认值
+function getTodayCheckInTarget(checkInTime) {
+    const [hours, minutes] = (checkInTime || DEFAULT_CONFIG.checkInTime).split(':').map(Number);
+    const target = new Date();
+    target.setHours(hours, minutes, 0, 0);
+    return target;
+}
+
+// 过点未签巡查：签到点已过、今天还没签、自动签到开着 → 补一次签到。
+// performCheckIn 内部还会按 lastCheckInDate 再判一次，重复调用是幂等的。
+async function checkMissedCheckIn(triggerReason) {
+    const { config } = await chrome.storage.local.get('config');
+    const cfg = config || {};
+
+    if (cfg.enabled === false) {
+        return;
+    }
+    if (cfg.lastCheckInDate === new Date().toDateString()) {
+        return;
+    }
+    if (pendingCheckInTrigger) {
+        console.log(`⏳ 已有进行中的签到（${pendingCheckInTrigger}），本次巡查跳过`);
+        return;
+    }
+    if (new Date() < getTodayCheckInTarget(cfg.checkInTime)) {
+        return;
+    }
+
+    console.log(`🔁 ${triggerReason}：今日已过签到时间且未签到，补签一次`);
+    await performCheckIn(null, 'auto');
 }
 
 // 计算下一次签到时间（毫秒时间戳）
@@ -67,21 +120,12 @@ function getNextScheduleTime(hours, minutes) {
 // （重启可能被清），且重复闹钟错过多次后周期会漂移。这里补两件事：
 // 过点未签就立即补签、把闹钟拉回设定的 wall-clock 时间。
 chrome.runtime.onStartup.addListener(async () => {
-    const { config } = await chrome.storage.local.get('config');
-    const cfg = config || {};
-    const [hours, minutes] = (cfg.checkInTime || '09:00').split(':').map(Number);
-
-    const now = new Date();
-    const target = new Date();
-    target.setHours(hours, minutes, 0, 0);
+    // 上次关闭前没来得及关的签到标签页
+    await cleanupOrphanTab();
 
     // 已过今天的签到点且今天还没签 → 立即补一次
     // （闹钟被清时这是唯一的补救机会；未被清时与 Chrome 的补触发互为幂等）
-    const signedToday = cfg.lastCheckInDate === now.toDateString();
-    if (target <= now && !signedToday && cfg.enabled !== false) {
-        console.log('🔁 启动时发现今日已过签到时间且未签到，立即补签');
-        await performCheckIn(null, 'auto');
-    }
+    await checkMissedCheckIn('启动时');
 
     // 重建闹钟：同名覆盖，把漂移的周期拉回设定时间
     setupDailyAlarm();
@@ -100,24 +144,30 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
             return;
         }
         await chrome.storage.session.remove('checkInRetry');
-        await performCheckIn(checkInRetry);
+        await performCheckIn(checkInRetry, checkInRetry.trigger || 'auto', checkInRetry.tabId);
+    } else if (alarm.name === MISSED_CHECK_IN_ALARM) {
+        console.log('过点未签巡查触发');
+        await checkMissedCheckIn('巡查');
     }
 });
 
 // 执行签到操作
 // resumeState 为上次重试持久化的状态（service worker 重启后由闹钟恢复）
-// trigger 为触发来源：'auto' 定时闹钟 / 'manual' 用户手动点击
+// trigger 为触发来源：'auto' 定时/巡查 / 'manual' 用户手动点击
+// tabId 仅重试恢复时传入：沿用上次创建的标签页，避免每次重试都新开一个
 // 返回值：签到结果对象 { success, alreadyCheckedIn?, pending?, skipped?, message }
-async function performCheckIn(resumeState = null, trigger = 'auto') {
+async function performCheckIn(resumeState = null, trigger = 'auto', tabId = null) {
     // config 提升到 try 外，异常路径下也能拿到它来决定通知行为
     let config = null;
+    // 本次新建的标签页；异常路径据此关闭，避免残留
+    let openedTabId = null;
 
     try {
         // 恢复重试时直接继续签到尝试
         // 重试期间不做 enabled / lastCheckInDate 判断：流程已经启动，
         // 中途改变配置不应把进行中的签到掐断
         if (resumeState) {
-            const resumed = await runCheckInAttempt(resumeState);
+            const resumed = await runCheckInAttempt(resumeState, tabId);
             return resumed || { success: true, pending: true };
         }
 
@@ -148,12 +198,16 @@ async function performCheckIn(resumeState = null, trigger = 'auto') {
             return { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' };
         }
 
+        // 从这一步起流程已启动：标记 pending，过点巡查看到后会让路
+        pendingCheckInTrigger = trigger;
+
         // 打开沸点页（签到入口已挪到 /pins，由 content.js 处理后续签到/跳转）
         console.log('打开掘金沸点页...');
         const tab = await chrome.tabs.create({
             url: 'https://juejin.cn/pins',
             active: false
         });
+        openedTabId = tab.id;
 
         // 等待首页加载完成（超时取 config.loadTimeout 秒，非法值回退默认）
         const timeoutSeconds = (Number.isInteger(config.loadTimeout) && config.loadTimeout > 0)
@@ -207,6 +261,7 @@ async function performCheckIn(resumeState = null, trigger = 'auto') {
         const state = {
             tabId: tab.id,
             config,
+            trigger,
             maxRetries,
             retryCount: 0,
             currentUrl: finalUrl
@@ -220,14 +275,65 @@ async function performCheckIn(resumeState = null, trigger = 'auto') {
     } catch (error) {
         console.error('签到过程出错:', error);
         // config 可能为 null（错误发生在读取配置之前），此时通知按默认行为显示
+        closeTabQuietly(openedTabId);
         return finalizeCheckInFailure(error.message || '签到过程出错', config);
+    } finally {
+        pendingCheckInTrigger = null;
+    }
+}
+
+// 尽力关闭签到用的标签页：延迟让结果可见；MV3 下 SW 可能先休眠导致 setTimeout 丢失，
+// 故同时在 storage.session 记一笔，SW 下次唤醒时（onStartup）兜底清理
+function closeTabQuietly(tabId, delayMs = 3000) {
+    if (typeof tabId !== 'number') {
+        return;
+    }
+    chrome.storage.session.set({ orphanTabId: tabId }).catch(() => {});
+    setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), delayMs);
+}
+
+// 清理上次残留的签到标签页（只关仍是掘金页的那些，防 id 复用误关别的页面）
+async function cleanupOrphanTab() {
+    const { orphanTabId } = await chrome.storage.session.get('orphanTabId');
+    if (typeof orphanTabId !== 'number') {
+        return;
+    }
+    await chrome.storage.session.remove('orphanTabId');
+    try {
+        const tab = await chrome.tabs.get(orphanTabId);
+        if (tab.url && tab.url.includes('juejin.cn')) {
+            await chrome.tabs.remove(orphanTabId);
+            console.log('🧹 已关闭上次残留的签到标签页');
+        }
+    } catch (e) {
+        // 标签页已不存在，忽略
     }
 }
 
 // 执行一次签到尝试；需要重试时通过 alarms 调度下一次（MV3 下比 setTimeout 更可靠）
+// resumeTabId 为上次创建的标签页：重试时沿用，避免每轮都新开一个标签页
 // 返回值：签到终态 result 对象；null 表示已转入重试，结果由后续尝试决定
-async function runCheckInAttempt(state) {
-    const { tabId, config } = state;
+async function runCheckInAttempt(state, resumeTabId = null) {
+    let tabId = state.tabId;
+
+    // 重试时标签页可能已被用户关闭：尝试补开，拿不到新 id 就直接判失败，不再空转
+    if (typeof resumeTabId === 'number') {
+        try {
+            await chrome.tabs.get(resumeTabId);
+            tabId = resumeTabId;
+        } catch (e) {
+            try {
+                const tab = await chrome.tabs.create({ url: 'https://juejin.cn/pins', active: false });
+                tabId = tab.id;
+                state.tabId = tabId;
+                console.log('🧭 原签到标签页已关闭，重新打开:', tabId);
+            } catch (createError) {
+                return finalizeCheckInFailure('签到标签页已关闭且无法重新打开', state.config);
+            }
+        }
+    }
+
+    const { config } = state;
     console.log(`📤 尝试发送签到消息 (${state.retryCount + 1}/${state.maxRetries})...`);
 
     // 先刷新当前 URL
@@ -357,16 +463,15 @@ async function runCheckInAttempt(state) {
         } else {
             const apiChecked = await finalizeIfApiVerified(await attemptCheckInViaApi(tabId), config, tabId);
             result = apiChecked || finalizeCheckInFailure(
-                response?.message || '签到操作失败，请手动检查', config);
+                response?.message || '签到操作失败，请手动检查', config, tabId);
         }
     }
 
-    // 延迟关闭标签页（给用户看结果的时间）
-    // 注意：MV3 下 service worker 可能在此期间休眠导致 setTimeout 丢失，
-    // 标签页会残留。这里仅是"让结果可见"的尽力而为，不影响签到正确性。
-    setTimeout(() => {
-        chrome.tabs.remove(tabId);
-    }, 3000);
+    // 延迟关闭标签页（给用户看结果的时间）。
+    // 转入重试时（result 为 null）先别关：下一轮沿用同一个标签页。
+    if (result) {
+        closeTabQuietly(tabId);
+    }
 
     return result;
 }
@@ -375,7 +480,12 @@ async function runCheckInAttempt(state) {
 async function scheduleCheckInRetry(state, delayMs = 3000) {
     console.log(`⏳ ${delayMs / 1000}秒后重试 (${state.retryCount}/${state.maxRetries})...`);
     await chrome.storage.session.set({ checkInRetry: state });
-    chrome.alarms.create('checkInRetry', { when: Date.now() + delayMs });
+    // 重试有上限（最多 maxRetries 次，单轮几秒到几十秒），用较长周期兜底；
+    // 过点巡查也不会在 pending 期间插手，直到重试链路彻底结束
+    chrome.alarms.create('checkInRetry', {
+        when: Date.now() + delayMs,
+        periodInMinutes: PENDING_CHECK_IN_RETRY_MIN
+    });
 }
 
 // 测试 content script 是否就绪
@@ -396,10 +506,15 @@ async function testContentScriptReady(tabId) {
 async function finalizeCheckInSuccess(result, config, tabId = null) {
     // 传递已读取的 config，避免重复读取存储
     await updateCheckInHistory(result, config);
+
+    // 服务端统计要合并进签到历史刚写回的那份配置：先读最新一次，
+    // 两项统计各自写一次，而不是各自再读再整份写回
+    const { config: latestConfig } = await chrome.storage.local.get(['config']);
+    const statsConfig = { ...DEFAULT_CONFIG, ...(latestConfig || config) };
     // 连续签到天数以服务端为准（本地推算可能有偏差；断签由服务端重置）
-    await syncConsecutiveDaysFromServer();
+    await syncConsecutiveDaysFromServer(statsConfig);
     // 本月签到天数同样以服务端为准（此刻今日已签到，故传 true）
-    await syncMonthCountFromServer(true);
+    await syncMonthCountFromServer(true, statsConfig);
 
     const message = result.alreadyCheckedIn ?
         (result.message || '今天已经签到过了') :
@@ -441,8 +556,8 @@ function finalizeCheckInFailure(message, config, tabId) {
 async function finalizeIfApiVerified(apiResult, config, tabId) {
     if (apiResult.success || apiResult.alreadyCheckedIn) {
         console.log('✅ API 确认：签到已成功！');
+        // 内部已统一关闭标签页（closeTabQuietly），这里不再重复关
         const result = await finalizeCheckInSuccess(apiResult, config, tabId);
-        chrome.tabs.remove(tabId);
         return result;
     }
     return null;
@@ -531,10 +646,22 @@ async function fetchCheckInCountsFromServer() {
 
 // 用服务端连续签到天数覆盖本地值（断签时服务端会自行重置，天然正确）
 // 返回 true 表示本地被更新
-async function syncConsecutiveDaysFromServer() {
+// baseConfig：调用方（签到成功路径）手里刚更新的配置对象。传入时直接更新它并落库，
+// 不再自己读一遍存储——避免读到旧快照后又整份写回，冲掉并发改动
+async function syncConsecutiveDaysFromServer(baseConfig = null) {
     const counts = await fetchCheckInCountsFromServer();
     if (!counts.ok || !Number.isInteger(counts.contCount)) {
         console.log('ℹ️ 连续签到天数同步失败，保留本地值:', counts.message);
+        return false;
+    }
+
+    if (baseConfig && (baseConfig.consecutiveDays || 0) !== counts.contCount) {
+        baseConfig.consecutiveDays = counts.contCount;
+        await chrome.storage.local.set({ config: baseConfig });
+        console.log('🔄 连续签到天数已按服务端更新为', counts.contCount);
+        return true;
+    }
+    if (baseConfig) {
         return false;
     }
 
@@ -637,11 +764,23 @@ async function fetchMonthCheckInCountFromServer(checkedIn) {
 
 // 用服务端数据刷新本月签到天数（跨月时 month 变化也会触发更新）
 // checkedIn: 今日服务端签到状态，null 表示未知
-async function syncMonthCountFromServer(checkedIn) {
+// baseConfig: 同 syncConsecutiveDaysFromServer，传入时直接合并写入调用方的最新配置
+async function syncMonthCountFromServer(checkedIn, baseConfig = null) {
     const month = await fetchMonthCheckInCountFromServer(checkedIn);
     if (!month.ok) {
         console.log('ℹ️ 本月签到天数同步失败，保留本地值:', month.message);
         return false;
+    }
+
+    if (baseConfig) {
+        if (baseConfig.monthCheckInMonth === month.month && baseConfig.monthCheckInCount === month.count) {
+            return false;
+        }
+        baseConfig.monthCheckInMonth = month.month;
+        baseConfig.monthCheckInCount = month.count;
+        await chrome.storage.local.set({ config: baseConfig });
+        console.log('🔄 本月签到天数已按服务端更新为', month.count);
+        return true;
     }
 
     const storage = await chrome.storage.local.get(['config']);
@@ -1176,7 +1315,8 @@ async function updateCheckInHistory(result, config = null) {
         const yesterdayStr = yesterday.toDateString();
 
         // 判断是否需要更新签到记录
-        const shouldUpdate = config.lastCheckInDate !== today || result.alreadyCheckedIn;
+        const signedByThisRun = config.lastCheckInDate !== today;
+        const shouldUpdate = signedByThisRun || result.alreadyCheckedIn;
 
         console.log('是否需要更新签到记录:', shouldUpdate);
         console.log('昨天的日期:', yesterdayStr);
@@ -1226,6 +1366,12 @@ async function updateCheckInHistory(result, config = null) {
             // 保存配置
             await chrome.storage.local.set({ config });
             console.log('✅ 签到历史已更新');
+
+            // 本次真正把"今日已签"落库：过点巡查到此收工，不用再每 30 分钟醒一次。
+            // （重复签到不会改 lastCheckInDate，巡查仍需继续盯着）
+            if (signedByThisRun) {
+                chrome.alarms.clear(MISSED_CHECK_IN_ALARM);
+            }
 
         } else {
             console.log('ℹ️ 今天已经签到过，无需重复更新');

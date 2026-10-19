@@ -13,7 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 快速开始
 
 详细的安装和使用说明请查看：
-- **用户指南**: [docs/QUICKSTART.md](docs/QUICKSTART.md)
+- **使用说明**: [docs/USAGE.md](docs/USAGE.md)（功能、触发规则、常见问题）
+- **快速上手**: [docs/QUICKSTART.md](docs/QUICKSTART.md)
 - **文档索引**: [docs/README.md](docs/README.md)
 
 **没有 lint / typecheck / build 步骤**。验证手段只有下面几种：
@@ -21,6 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm test` —— 跑 [tests/simulate-checkin-timing.js](tests/simulate-checkin-timing.js)（约 6 秒，无第三方依赖）。用 Node `vm` 沙箱 + 假 DOM/fetch 执行 `content.js`，7 个场景**并发**跑完整签到验证链，断言各自预算与「单场景最坏耗时 ≤ 8000ms」红线。改 `content.js` 的等待/轮询逻辑后必须跑。
 - `npm run test:ab` —— 额外 `git show HEAD:content.js` 取旧版做 A/B 对比，仅供观察，不影响退出码。
 - `npm run test:lottery` —— 跑 [tests/simulate-lottery.js](tests/simulate-lottery.js)（约 1 秒）。以 vm 沙箱 + 假 chrome API/fetch 加载 `background.js`，断言抽奖门禁（无免费次数不抽、也不发 draw 请求）、奖品名取自 `lottery_name`、`err_no:400` 归为跳过、当天已有中奖记录不被后续 skipped 覆盖。改抽奖逻辑后必须跑。
+- `npm run test:missed` —— 跑 [tests/simulate-missed-checkin.js](tests/simulate-missed-checkin.js)（约 1 秒）。断言过点未签巡查：过点未签才补、已签/未到点/开关关闭不补、已有进行中的签到让路、开关状态决定巡查闹钟的创建与清理、签到落库后清掉巡查闹钟。改巡查或 `updateCheckInHistory` 后必须跑。
 - `node e2e-checkin.js` —— 真机端到端（需先 `npm install` + `npx playwright install chromium`）。Playwright 用命令行 `--load-extension` 把插件装进独立临时 profile，跑 `manualCheckIn` 并断言 popup 文案。**必须用 Playwright 自带的 Chromium**：本机 Chrome 152+ 已彻底禁用命令行 `--load-extension`。首次运行需在弹出的窗口里登录掘金，登录态持久化在 `$TMPDIR/juejin-qiandao-e2e-profile`。
 - 真机手动验证：`chrome://extensions` 开发者模式 → Load unpacked 加载本目录。
 
@@ -86,8 +88,9 @@ shared/
 
 使用 Chrome Alarms API 实现每日定时签到（[background.js](background.js)）：
 - `setupDailyAlarm()` - 按 config.checkInTime 计算下次触发时间，创建 `dailyCheckIn` 闹钟（周期 24h）。
-- `chrome.alarms.onAlarm` 监听 `dailyCheckIn` 触发签到、`checkInRetry` 触发重试。
-- `chrome.runtime.onStartup` 兜底 - 闹钟持久化官方「不保证」（重启可能被清），重复闹钟错过多次后周期还会漂移。故浏览器启动时补两件事：今日已过签到点且未签则立即补签；无条件 `setupDailyAlarm()` 把周期拉回设定的 wall-clock 时间（同名覆盖）。
+- `chrome.alarms.onAlarm` 监听 `dailyCheckIn` 触发签到、`checkInRetry` 触发重试、`missedCheckInWatch` 触发过点未签巡查。
+- **过点未签巡查**：`setupDailyAlarm()` 同时创建 30 分钟周期闹钟 `missedCheckInWatch`；`checkMissedCheckIn()` 只在「签到点已过 + 今天未签 + 自动签到开着」时补签一次，否则让 `performCheckIn` 的已有判断兜底（幂等）。签到真正落库今日已签时（`updateCheckInHistory` 里 `lastCheckInDate` 有变化）清掉该闹钟，当天收工；自动签到关闭时也清掉。`pendingCheckInTrigger` 非空（签到已转入重试）时巡查让路，避免两个流程抢同一标签页。
+- `chrome.runtime.onStartup` 兜底 - 闹钟持久化官方「不保证」（重启可能被清），重复闹钟错过多次后周期还会漂移。故浏览器启动时做三件事：清理上次残留的签到标签页（`orphanTabId`）、调用 `checkMissedCheckIn` 补签、无条件 `setupDailyAlarm()` 把周期拉回设定的 wall-clock 时间（同名覆盖）。
 - **注意**: Chrome 必须在运行状态才能触发定时任务。
 
 ### 2. 签到策略（多重选择器）
@@ -143,6 +146,8 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 **popup 的状态可能"假阴性"**：popup 判断今日是否已签只看本地 `config.lastCheckInDate`（`popup.js` 的 `updateCheckInStatus` 只比 `=== 今天`）。因此网页签到 / 多设备 / 重装后本地无记录时会误显示"未签到"。为此 popup 打开时调 `syncCheckInStatus`，由 background 直接 `fetch` 服务端核对（SW 里带 cookie 是通的），已签到则用 `updateCheckInHistory` 补写本地再刷新 UI；本地已有记录则直接返回，不重复写历史。
 
 **updateConfig 合并语义**：background 收到 `updateConfig` 时先读取已存配置再合并（`{ ...DEFAULT_CONFIG, ...已存配置, ...传入字段 }`），因此调用方可以只提交部分字段。这点很关键——options.js 的 `saveConfig()` 只提交表单里的 6 项，若整体覆盖会抹掉 `lastCheckInDate` / `checkInHistory` / `consecutiveDays`。
+
+**页面侧只提交改动字段，绝不「先 getConfig 再整体写回」**：popup 打开时 background 可能正在并行写 `lastCheckInDate` / `consecutiveDays` / `lotteryHistory`，整体写回会用旧快照冲掉它们。设置页与弹窗都监听 `chrome.storage.onChanged` 实时回显对方的改动（设置页在表单有未保存修改时不覆盖），重置按钮也只提交表单字段。
 
 ### 4. 重复签到检测
 
@@ -403,6 +408,7 @@ chrome.runtime.sendMessage({ action: 'manualCheckIn' })
 
 ### 用户文档
 - [README.md](README.md) - 项目说明文档
+- [docs/USAGE.md](docs/USAGE.md) - 完整使用说明（面向用户）
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) - 快速开始指南
 - [docs/README.md](docs/README.md) - 文档索引
 

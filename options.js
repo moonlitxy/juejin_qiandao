@@ -16,6 +16,19 @@ const MANUAL_CHECKIN_TIMEOUT = 90000;
 let lotteryLogCache = [];
 let lotteryView = { year: 0, month: 0 };
 
+// 设置表单字段与配置字段的对应关系（回显 / 脏检查 / 重置共用）
+// options 页只处理这几项；lastCheckInDate、checkInHistory 等运行时字段不在表单里
+const FORM_FIELDS = [
+    { key: 'enabled', el: 'enabledToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'checkInTime', el: 'checkInTime', type: 'value', fallback: v => v || DEFAULT_CONFIG.checkInTime },
+    { key: 'autoLottery', el: 'autoLotteryToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'syncLottery', el: 'lotterySyncToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'successNotification', el: 'successNotification', type: 'checked', fallback: v => v },
+    { key: 'failureNotification', el: 'failureNotification', type: 'checked', fallback: v => v },
+    { key: 'retryCount', el: 'retryCount', type: 'value', fallback: v => v },
+    { key: 'loadTimeout', el: 'loadTimeout', type: 'value', fallback: v => v }
+];
+
 // DOM元素
 const elements = {
     manualCheckInBtn: null,
@@ -92,6 +105,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 loadCalendar();
                 loadHistory();
             }
+        }
+    });
+
+    // 外部改配置（弹窗改签到时间、其他标签页保存）时同步回显：
+    // 设置页不能只在打开时读一次，否则旧值会一直显示，再点保存还会把外部改动覆盖回去
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.config && changes.config.newValue) {
+            applyFormValues(changes.config.newValue);
+        }
+    });
+
+    // 从后台切回设置页时再核对一次（onChanged 在页面挂起期间可能错过）
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            refreshFormFromStorage();
         }
     });
 });
@@ -214,19 +242,51 @@ async function loadConfig() {
         currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
 
         // 更新UI
-        elements.enabledToggle.checked = currentConfig.enabled;
-        elements.checkInTime.value = currentConfig.checkInTime;
-        elements.autoLotteryToggle.checked = currentConfig.autoLottery !== false;
-        elements.lotterySyncToggle.checked = currentConfig.syncLottery !== false;
-        elements.successNotification.checked = currentConfig.successNotification;
-        elements.failureNotification.checked = currentConfig.failureNotification;
-        elements.retryCount.value = currentConfig.retryCount;
-        elements.loadTimeout.value = currentConfig.loadTimeout;
+        applyFormValues(currentConfig);
 
     } catch (error) {
         console.error('加载配置失败:', error);
         showPageNotification('加载配置失败', 'error');
     }
+}
+
+// 从存储重新读取配置
+async function refreshFormFromStorage() {
+    try {
+        const response = await sendMessage({ action: 'getConfig' });
+        const savedConfig = response.config || {};
+        applyFormValues({ ...DEFAULT_CONFIG, ...savedConfig });
+    } catch (error) {
+        console.warn('刷新配置回显失败:', error);
+    }
+}
+
+// 把配置回显到表单
+// 表单里有尚未保存的修改时不覆盖，避免「正在编辑时被外部改动冲掉」；
+// 没有待保存修改则直接同步，保证弹窗改的时间能实时反映到设置页
+function applyFormValues(config) {
+    if (isFormDirty()) {
+        console.log('表单有未保存的修改，跳过外部配置回显');
+        return;
+    }
+
+    currentConfig = { ...DEFAULT_CONFIG, ...config };
+    FORM_FIELDS.forEach(field => {
+        const value = currentConfig[field.key];
+        elements[field.el][field.type] = field.fallback(value);
+    });
+}
+
+// 表单当前值与上次回显的配置是否不一致
+function isFormDirty() {
+    return FORM_FIELDS.some(field => {
+        let current = elements[field.el][field.type];
+        // 用 <select> 取值，下拉框的 value 是字符串
+        if (current !== null && typeof current === 'object' && 'value' in current) {
+            current = current.value;
+        }
+        return current !== field.fallback(currentConfig[field.key]);
+    });
 }
 
 // 保存配置
@@ -265,24 +325,24 @@ async function saveConfig() {
 // 重置配置
 async function resetConfig() {
     try {
-        // 重置为默认配置（使用 shared/config.js 中的 DEFAULT_CONFIG）
+        // 只提交表单里的设置项，不提交整份 DEFAULT_CONFIG：
+        // background 是「默认值 + 已存值 + 请求值」的合并语义，整份提交等于把
+        // lastCheckInDate / checkInHistory / lotteryHistory 也一并清空
+        const defaultFormConfig = {};
+        FORM_FIELDS.forEach(field => {
+            defaultFormConfig[field.key] = DEFAULT_CONFIG[field.key];
+        });
+
         await sendMessage({
             action: 'updateConfig',
-            config: DEFAULT_CONFIG
+            config: defaultFormConfig
         });
 
         // 更新当前配置：只重置设置项，保留签到历史等运行时字段
-        currentConfig = { ...currentConfig, ...DEFAULT_CONFIG };
+        currentConfig = { ...currentConfig, ...defaultFormConfig };
 
         // 更新UI
-        elements.enabledToggle.checked = DEFAULT_CONFIG.enabled;
-        elements.checkInTime.value = DEFAULT_CONFIG.checkInTime;
-        elements.autoLotteryToggle.checked = DEFAULT_CONFIG.autoLottery;
-        elements.lotterySyncToggle.checked = DEFAULT_CONFIG.syncLottery;
-        elements.successNotification.checked = DEFAULT_CONFIG.successNotification;
-        elements.failureNotification.checked = DEFAULT_CONFIG.failureNotification;
-        elements.retryCount.value = DEFAULT_CONFIG.retryCount;
-        elements.loadTimeout.value = DEFAULT_CONFIG.loadTimeout;
+        applyFormValues(currentConfig);
 
         showPageNotification('设置已重置', 'success');
 
