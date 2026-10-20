@@ -90,6 +90,7 @@ const chromeMock = {
 
 const source = [
     fs.readFileSync(path.join(ROOT, 'shared', 'config.js'), 'utf8'),
+    fs.readFileSync(path.join(ROOT, 'shared', 'date.js'), 'utf8'),
     fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8'),
     // 测试里不看真实签到流程，只记录被补签了几次
     'let __performCalls = 0;',

@@ -21,8 +21,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `npm test` —— 跑 [tests/simulate-checkin-timing.js](tests/simulate-checkin-timing.js)（约 6 秒，无第三方依赖）。用 Node `vm` 沙箱 + 假 DOM/fetch 执行 `content.js`，7 个场景**并发**跑完整签到验证链，断言各自预算与「单场景最坏耗时 ≤ 8000ms」红线。改 `content.js` 的等待/轮询逻辑后必须跑。
 - `npm run test:ab` —— 额外 `git show HEAD:content.js` 取旧版做 A/B 对比，仅供观察，不影响退出码。
-- `npm run test:lottery` —— 跑 [tests/simulate-lottery.js](tests/simulate-lottery.js)（约 1 秒）。以 vm 沙箱 + 假 chrome API/fetch 加载 `background.js`，断言抽奖门禁（无免费次数不抽、也不发 draw 请求）、奖品名取自 `lottery_name`、`err_no:400` 归为跳过、当天已有中奖记录不被后续 skipped 覆盖。改抽奖逻辑后必须跑。
+- `npm run test:lottery` —— 跑 [tests/simulate-lottery.js](tests/simulate-lottery.js)（约 1 秒）。以 vm 沙箱 + 假 chrome API/fetch 加载 `background.js`，断言抽奖门禁（无免费次数不抽、也不发 draw 请求）、奖品名取自 `lottery_name`、`err_no:400` 归为跳过、当天已有中奖记录不被后续 skipped 覆盖、其他设备同步来的今日中奖能在本机 popup 显示（本机 skipped 不覆盖同步中奖）。改抽奖逻辑后必须跑。
 - `npm run test:missed` —— 跑 [tests/simulate-missed-checkin.js](tests/simulate-missed-checkin.js)（约 1 秒）。断言过点未签巡查：过点未签才补、已签/未到点/开关关闭不补、已有进行中的签到让路、开关状态决定巡查闹钟的创建与清理、签到落库后清掉巡查闹钟。改巡查或 `updateCheckInHistory` 后必须跑。
+- `npm run test:date` —— 跑 [tests/simulate-date-key.js](tests/simulate-date-key.js)（约 1 秒）。断言抽奖日期归属按 UTC+8 计算且与设备时区无关（用子进程切换 `TZ` 覆盖 UTC-7 / UTC+8 / UTC+9 / UTC），含跨天、跨月、跨年边界。改 `shared/date.js` 或同步 key 逻辑后必须跑。
 - `node e2e-checkin.js` —— 真机端到端（需先 `npm install` + `npx playwright install chromium`）。Playwright 用命令行 `--load-extension` 把插件装进独立临时 profile，跑 `manualCheckIn` 并断言 popup 文案。**必须用 Playwright 自带的 Chromium**：本机 Chrome 152+ 已彻底禁用命令行 `--load-extension`。首次运行需在弹出的窗口里登录掘金，登录态持久化在 `$TMPDIR/juejin-qiandao-e2e-profile`。
 - 真机手动验证：`chrome://extensions` 开发者模式 → Load unpacked 加载本目录。
 
@@ -61,6 +62,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 shared/
   ├── config.js        # DEFAULT_CONFIG, CONFIG_KEYS
+  ├── date.js          # toLotteryDateKey（抽奖归属日，固定 UTC+8）
   ├── messaging.js     # sendMessage
   └── notification.js  # showPageNotification(+便捷方法 showSuccess/showError/showInfo)
 ```
@@ -68,6 +70,7 @@ shared/
 无模块化、无 bundle，靠 manifest `content_scripts`、HTML `<script>` 标签、以及 service worker 的 `importScripts` 三种方式加载，用全局变量通信。**各脚本的可用范围不同**：
 
 - `shared/config.js`：注入 content_scripts（manifest.json）、被 popup/options 的 HTML 引入，并由 **background.js 通过 `importScripts('shared/config.js')` 加载**（MV3 的 service worker 支持同步 importScripts）。
+- `shared/date.js`：同上，background 用 `importScripts`、popup/options 用 `<script>` 引入。定义 `toLotteryDateKey()`——**抽奖归属日一律按 UTC+8 计算**，不能用 `getFullYear()` / `toDateString()`（那些读设备本地时区），否则跨时区设备会把同一条记录归到不同天，`lottery:YYYY-MM-DD` 的同步 key 也会对不上。`background.js` 的 `toDateKey()` 只是它的薄封装。
 - `shared/messaging.js`、`shared/notification.js`：**仅** popup/options 的 HTML 引入。
 - 全仓库**只有一份** `DEFAULT_CONFIG` 定义（在 `shared/config.js`）。新增配置字段只改这一处，并同步 `CONFIG_KEYS` 与所有读写点。
 - `CONFIG_KEYS` 目前无调用方，但它是配置字段的键名清单，改字段时仍需同步维护。
@@ -125,6 +128,7 @@ sendMessage({ action: 'syncCheckInStatus' })   // popup 打开时与服务端核
 sendMessage({ action: 'getMonthCheckIn' })     // 设置页签到日历：本月逐日明细（数据以服务端 get_by_month 为准）
 sendMessage({ action: 'getCurrentPoint' })     // popup 显示当前矿石总数（实时查 get_cur_point）
 sendMessage({ action: 'getLotteryLog' })       // 设置页抽奖日志：本机流水 + 其他设备同步记录，按天聚合
+sendMessage({ action: 'getTodayLottery' })     // popup 抽奖行：今天的聚合结果（同步来的中奖也返回）
 
 // background → popup：签到完成后广播，popup 收到后重新 loadConfig 刷新 UI
 chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
@@ -195,7 +199,9 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 **popup 的「当前矿石」**：走 `getCurrentPoint` 消息实时查 `get_cur_point`，不落库。popup 打开时查一次；收到 `checkInCompleted` 广播后再查一次（签到、抽奖都可能改变点数，服务端已计入，无需本地累加）。未登录或查询失败时显示 `-`。
 
-**抽奖记录的留存与同步**：本机流水存 `config.lotteryHistory`（最近90条，含 skipped / failed）。开启 `syncLottery` 时，抽奖后额外写 `chrome.storage.sync` 的 `lottery:YYYY-MM-DD`——**按天一个 key**，规避 sync 单项 8KB 限制（未登录 Chrome 账号时 sync 退化为本地存储，不报错）。设置页通过 `getLotteryLog` 取「本机流水 ∪ 已同步记录」，按天聚合（同一天优先 `won`），再由 `renderLotteryCalendar` 按选中年月铺成月历（默认当前月，可翻月）。
+**抽奖记录的留存与同步**：本机流水存 `config.lotteryHistory`（最近90条，含 skipped / failed）。开启 `syncLottery` 时，抽奖后额外写 `chrome.storage.sync` 的 `lottery:YYYY-MM-DD`——**按天一个 key**，规避 sync 单项 8KB 限制；**key 里的日期按 UTC+8 计算**（`toLotteryDateKey`），读端也用它重新归类，设备时区不影响归属（未登录 Chrome 账号时 sync 退化为本地存储，不报错）。设置页通过 `getLotteryLog` 取「本机流水 ∪ 已同步记录」，按天聚合（同一天优先 `won`），再由 `renderLotteryCalendar` 按选中年月铺成月历（默认当前月，可翻月）。
+
+**popup 的抽奖行也看同步记录**：`config.lotteryResult` 只存本机，本机没抽（skipped）时无法反映别处的战果。为此 popup 改走 `getTodayLottery`，由 `getTodayLotteryResult()` 取「本机流水 ∪ 同步记录 ∪ 已有 lotteryResult」里今天的记录，**中奖优先**。两条写入规则配合：① `saveLotteryResult` 写 `chrome.storage.sync` 前先查同一天的已有记录，对方已中奖则**不再写入本机的 skipped/failed**（否则会覆盖掉对方的中奖，两边 popup 都看不到奖品）；② 同步记录到达时 `storage.onChanged`（area `sync`）触发 `refreshLotteryResultFromSync()` 把今日中奖补写进本地 `lotteryResult`。
 
 **签到日历做不到跨月（别再白试）**：掘金 `get_by_month` **不接受任何月份参数**——实测 `?month=2026-09`、`?year=2026&month=9`、`?date=`、`?query=` 等 7 种写法返回的是同一段数据（约 31 天）。服务端只提供这一段，插件本地也只有近 30 条 `checkInHistory`，所以签到日历只能显示服务端给的当前区间。抽奖日历不受此限，因为数据存在本机与 `chrome.storage.sync`。
 

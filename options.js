@@ -241,8 +241,8 @@ async function loadConfig() {
         // 合并配置（使用 shared/config.js 中的 DEFAULT_CONFIG）
         currentConfig = { ...DEFAULT_CONFIG, ...savedConfig };
 
-        // 更新UI
-        applyFormValues(currentConfig);
+        // 更新UI（首次加载强制回显：表单此刻还是 HTML 默认值，不是用户的修改）
+        applyFormValues(currentConfig, true);
 
     } catch (error) {
         console.error('加载配置失败:', error);
@@ -263,9 +263,10 @@ async function refreshFormFromStorage() {
 
 // 把配置回显到表单
 // 表单里有尚未保存的修改时不覆盖，避免「正在编辑时被外部改动冲掉」；
-// 没有待保存修改则直接同步，保证弹窗改的时间能实时反映到设置页
-function applyFormValues(config) {
-    if (isFormDirty()) {
+// 没有待保存修改则直接同步，保证弹窗改的时间能实时反映到设置页。
+// force=true 用于首次加载：此时表单还是 HTML 默认值，不能拿它当"用户的修改"
+function applyFormValues(config, force = false) {
+    if (!force && isFormDirty()) {
         console.log('表单有未保存的修改，跳过外部配置回显');
         return;
     }
@@ -278,14 +279,11 @@ function applyFormValues(config) {
 }
 
 // 表单当前值与上次回显的配置是否不一致
+// 必须按字符串比较：<select> 的 value 是字符串（'1'），而配置里是数字（1）
 function isFormDirty() {
     return FORM_FIELDS.some(field => {
-        let current = elements[field.el][field.type];
-        // 用 <select> 取值，下拉框的 value 是字符串
-        if (current !== null && typeof current === 'object' && 'value' in current) {
-            current = current.value;
-        }
-        return current !== field.fallback(currentConfig[field.key]);
+        const current = String(elements[field.el][field.type]);
+        return current !== String(field.fallback(currentConfig[field.key]));
     });
 }
 
@@ -339,10 +337,11 @@ async function resetConfig() {
         });
 
         // 更新当前配置：只重置设置项，保留签到历史等运行时字段
+        // 用 force：此刻表单里还是用户改过的旧值，脏检查会误判为"有未保存修改"
         currentConfig = { ...currentConfig, ...defaultFormConfig };
 
         // 更新UI
-        applyFormValues(currentConfig);
+        applyFormValues(currentConfig, true);
 
         showPageNotification('设置已重置', 'success');
 
@@ -504,22 +503,29 @@ async function loadLotteryLog() {
 // 渲染抽奖日历：按 lotteryView 指定的年月铺 7 列网格
 // 每个格子显示日期 + 当天结果（奖品名 / 未抽奖 / 失败）
 function renderLotteryCalendar() {
-    const now = new Date();
+    // 「今天」按 UTC+8 判定，与记录的归属日同一口径
+    const [todayYear, todayMonth, todayDay] = toLotteryDateKey(new Date()).split('-').map(Number);
     if (!lotteryView.year) {
-        lotteryView = { year: now.getFullYear(), month: now.getMonth() + 1 };
+        lotteryView = { year: todayYear, month: todayMonth };
     }
     const { year, month } = lotteryView;
 
     elements.lotteryCalendarMonth.textContent = `${year}年${month}月`;
 
-    // 按"日"索引当月记录；同一天优先中奖
+    // 按"日"索引当月记录；同一天优先中奖。
+    // 归属日按 UTC+8 计算（toLotteryDateKey），与写入端同一口径，
+    // 否则跨时区设备会把同一条记录画到不同格子
     const dayMap = new Map();
     for (const record of lotteryLogCache) {
-        const d = new Date(record.date);
-        if (d.getFullYear() !== year || d.getMonth() + 1 !== month) {
+        const key = toLotteryDateKey(record.date);
+        if (!key) {
             continue;
         }
-        const day = d.getDate();
+        const [recYear, recMonth, recDay] = key.split('-').map(Number);
+        if (recYear !== year || recMonth !== month) {
+            continue;
+        }
+        const day = recDay;
         const existing = dayMap.get(day);
         if (!existing || (existing.status !== 'won' && record.status === 'won')) {
             dayMap.set(day, record);
@@ -548,13 +554,13 @@ function renderLotteryCalendar() {
 
     // 逐日填充
     const daysInMonth = new Date(year, month, 0).getDate();
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1;
+    const isCurrentMonth = year === todayYear && month === todayMonth;
 
     for (let day = 1; day <= daysInMonth; day++) {
         const cell = document.createElement('div');
         cell.className = 'calendar-day lottery-day';
 
-        if (isCurrentMonth && day === now.getDate()) {
+        if (isCurrentMonth && day === todayDay) {
             cell.classList.add('today');
         }
 
@@ -589,9 +595,9 @@ function renderLotteryCalendar() {
 
 // 切换抽奖日历的查看月份
 function shiftLotteryMonth(delta) {
-    const now = new Date();
-    let year = lotteryView.year || now.getFullYear();
-    let month = lotteryView.month || now.getMonth() + 1;
+    const [todayYear, todayMonth] = toLotteryDateKey(new Date()).split('-').map(Number);
+    let year = lotteryView.year || todayYear;
+    let month = lotteryView.month || todayMonth;
 
     month += delta;
     if (month < 1) {

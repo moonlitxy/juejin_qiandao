@@ -32,6 +32,19 @@ const MANUAL_CHECKIN_TIMEOUT = 90000;
 // 签到时间输入的保存防抖（毫秒）：input 事件每次改值都会触发，合并后再提交
 const TIME_SAVE_DEBOUNCE = 400;
 let timeSaveTimerId = null;
+// 防抖窗口内待提交的时间值；弹窗关闭前用它补交
+let pendingCheckInTime = null;
+
+// 立即提交防抖中的签到时间（幂等：没有待提交值就什么也不做）
+function flushCheckInTime() {
+    clearTimeout(timeSaveTimerId);
+    timeSaveTimerId = null;
+    const value = pendingCheckInTime;
+    pendingCheckInTime = null;
+    if (value) {
+        updateConfig({ checkInTime: value });
+    }
+}
 
 // 初始化
 document.addEventListener('DOMContentLoaded', async () => {
@@ -61,6 +74,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 更新签到状态（传入已读取的 config，避免重复读取）
     updateCheckInStatus(config);
 
+    // 今日抽奖结果：取「本机 ∪ 其他设备同步」的聚合记录，
+    // 本机没抽、别处抽中的奖品这里也要显示
+    refreshLotteryStatus();
+
     // 与服务端核对一次：本地可能没有记录（网页签到 / 多设备 / 重装），
     // 否则会误显示"未签到"
     syncCheckInStatusFromServer();
@@ -83,6 +100,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             loadConfig().then(config => {
                 updateCheckInStatus(config);
             });
+
+            // 签到后抽奖会用掉免费次数，刷新抽奖行
+            refreshLotteryStatus();
 
             // 签到 / 抽奖可能改变矿石总数，刷新一次
             updateCurrentPoint();
@@ -115,13 +135,23 @@ function bindEventListeners() {
         if (!value) {
             return;
         }
+        pendingCheckInTime = value;
         clearTimeout(timeSaveTimerId);
         timeSaveTimerId = setTimeout(() => {
-            updateConfig({ checkInTime: value });
+            flushCheckInTime();
         }, TIME_SAVE_DEBOUNCE);
     };
     elements.checkInTime.addEventListener('input', saveCheckInTime);
     elements.checkInTime.addEventListener('change', saveCheckInTime);
+
+    // 弹窗关闭时 setTimeout 会被直接丢弃，防抖窗口内关掉弹窗就丢设置，
+    // 这里在页面隐藏 / 卸载时立即补交一次
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            flushCheckInTime();
+        }
+    });
+    window.addEventListener('pagehide', flushCheckInTime);
 
     // 打开设置页面
     elements.optionsBtn.addEventListener('click', () => {
@@ -135,6 +165,8 @@ function bindEventListeners() {
             const config = changes.config.newValue;
             elements.autoCheckInToggle.checked = config.enabled !== false;
             elements.checkInTime.value = config.checkInTime || '09:00';
+            // 其他设备同步来的抽奖结果由 background 回写进 lotteryResult，这里跟着刷新
+            updateLotteryStatus(config);
         }
     });
 }
@@ -252,14 +284,27 @@ function updateStatistics(config) {
     elements.totalDays.textContent = totalDays;
 }
 
+// 从 background 取今日抽奖结果（本机流水 ∪ 其他设备同步记录）并渲染
+async function refreshLotteryStatus() {
+    try {
+        const response = await sendMessage({ action: 'getTodayLottery' });
+        updateLotteryStatus({ lotteryResult: response && response.record });
+    } catch (error) {
+        console.warn('获取今日抽奖结果失败:', error);
+        // 后台不可用时退回本地记录
+        loadConfig().then(config => updateLotteryStatus(config));
+    }
+}
+
 // 渲染抽奖结果行（只在当天抽中时显示；跳过/失败不占位，避免噪声）
 function updateLotteryStatus(config) {
     const section = elements.lotterySection;
     const record = config && config.lotteryResult;
 
+    // 「今天」按 UTC+8 判定（掘金结算时区），设备时区不影响
     const isTodayWin = record
         && record.status === 'won'
-        && new Date(record.date).toDateString() === new Date().toDateString();
+        && toLotteryDateKey(record.date) === toLotteryDateKey(new Date());
 
     if (!isTodayWin) {
         section.hidden = true;

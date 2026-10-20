@@ -14,6 +14,7 @@
 
 'use strict';
 
+
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -57,24 +58,44 @@ const fetchImpl = async (url) => {
     return jsonResponse({ err_no: 404, err_msg: `未知请求: ${target}` }, 404);
 };
 
-// 内存版 chrome.storage.local
+// 内存版 chrome.storage.local（返回深拷贝，避免宿主与沙箱共享引用造成干扰）
 let store = {};
 const storageLocal = {
     async get(keys) {
+        const pick = (k) => JSON.parse(JSON.stringify({ v: store[k] })).v;
         if (typeof keys === 'string') {
-            return { [keys]: store[keys] };
+            return { [keys]: pick(keys) };
         }
         if (Array.isArray(keys)) {
             const out = {};
             for (const k of keys) {
-                out[k] = store[k];
+                out[k] = pick(k);
             }
             return out;
         }
-        return { ...store };
+        return JSON.parse(JSON.stringify(store));
     },
     async set(obj) {
-        Object.assign(store, obj);
+        Object.assign(store, JSON.parse(JSON.stringify(obj)));
+    },
+};
+
+// 内存版 chrome.storage.sync（模拟其他设备同步来的按天记录）
+let syncStore = {};
+const storageSync = {
+    async get(keys) {
+        if (keys === null || keys === undefined) {
+            return JSON.parse(JSON.stringify(syncStore));
+        }
+        const pick = (k) => JSON.parse(JSON.stringify({ v: syncStore[k] })).v;
+        const out = {};
+        for (const k of Array.isArray(keys) ? keys : [keys]) {
+            out[k] = pick(k);
+        }
+        return out;
+    },
+    async set(obj) {
+        Object.assign(syncStore, obj);
     },
 };
 
@@ -92,6 +113,7 @@ const chromeMock = {
     },
     storage: {
         local: storageLocal,
+        sync: storageSync,
         session: { async get() { return {}; }, async set() {}, async remove() {} },
         onChanged: noopListener,
     },
@@ -118,6 +140,7 @@ const chromeMock = {
 // （importScripts 在真实 MV3 里同步加载 config.js，这里已在源码层面拼好）
 const source = [
     fs.readFileSync(path.join(ROOT, 'shared', 'config.js'), 'utf8'),
+    fs.readFileSync(path.join(ROOT, 'shared', 'date.js'), 'utf8'),
     fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8'),
 ].join('\n');
 
@@ -150,6 +173,12 @@ async function runInSandbox(code) {
 // 今天（与 background.js 的 new Date().toDateString() 同口径）
 const todayIso = new Date().toISOString();
 
+// 与 background.js 的 toDateKey 同口径（本地日期 YYYY-MM-DD）
+function toDateKeyInTest(isoString) {
+    const d = new Date(isoString);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function main() {
     console.log('掘金签到扩展 - 自动抽奖逻辑测试');
     console.log('');
@@ -181,6 +210,7 @@ async function main() {
         JSON.stringify(out.result));
 
     // 场景 5：同一天已有 won，后续 skipped 不覆盖 lotteryResult，但历史仍记录
+    syncStore = {};
     store = {
         config: {
             lotteryResult: { date: todayIso, status: 'won', prizeName: '徽章', message: '抽中 徽章' },
@@ -202,6 +232,31 @@ async function main() {
         `prizeName=${saved.lotteryResult.prizeName}`);
     assert('历史仍记录本次 skipped', saved.lotteryHistory[0].status === 'skipped',
         `history[0]=${JSON.stringify(saved.lotteryHistory[0])}`);
+
+    // 场景 6：本机没抽、其他设备同步来今日中奖 → lotteryResult 取同步记录（popup 能显示）
+    syncStore = {
+        ['lottery:' + toDateKeyInTest(todayIso)]: {
+            date: todayIso, status: 'won', prizeName: '42矿石', message: '抽中 42矿石',
+        },
+    };
+    store = { config: { lotteryResult: null, lotteryHistory: [] } };
+    out = await runInSandbox('__out.result = await getTodayLotteryResult((await chrome.storage.local.get("config")).config);');
+    assert('本机无记录时今日结果取同步中奖', out.result && out.result.prizeName === '42矿石',
+        JSON.stringify(out.result));
+
+    // 场景 7：其他设备先抽中，本机后跑的 skipped 不覆盖，lotteryResult 仍为中奖
+    store = { config: { lotteryResult: null, lotteryHistory: [] } };
+    await runInSandbox(`
+        __out.result = await saveLotteryResult({
+            status: 'skipped',
+            prizeName: null,
+            message: '今日无免费抽奖机会',
+            freeCount: 0
+        });
+    `);
+    assert('本机 skipped 后 lotteryResult 仍为同步中奖',
+        store.config.lotteryResult && store.config.lotteryResult.prizeName === '42矿石',
+        JSON.stringify(store.config.lotteryResult));
 
     // 汇总
     console.log('');

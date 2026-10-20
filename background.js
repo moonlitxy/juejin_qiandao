@@ -5,6 +5,8 @@
 // DEFAULT_CONFIG，避免与内容脚本 / UI 侧维护两份需要手工同步的配置定义。
 // 路径相对于扩展根目录。
 importScripts('shared/config.js');
+// 抽奖日期归属统一按掘金结算时区（UTC+8）计算，跨时区设备才能归到同一天
+importScripts('shared/date.js');
 
 // 过点未签巡查闹钟：周期与单次补签的重试上限（分钟）
 const MISSED_CHECK_IN_ALARM = 'missedCheckInWatch';
@@ -1157,18 +1159,22 @@ async function runLottery(tabId) {
 }
 
 // 把 ISO 时间串转成本地日期 key（YYYY-MM-DD），用于按天同步
+// 抽奖归属日：按 UTC+8 计算（见 shared/date.js）。
+// 保留这个薄封装，调用方不必关心具体时区实现。
 function toDateKey(isoString) {
-    const d = new Date(isoString);
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${d.getFullYear()}-${month}-${day}`;
+    return toLotteryDateKey(isoString);
 }
 
 // 汇总抽奖日志：本机流水 + 其他设备同步来的记录，按天聚合后倒序返回。
 // 同一天优先保留中奖记录（两台设备同一天一台抽中、一台跳过时，以中奖为准）。
 async function fetchLotteryLog() {
     const storage = await chrome.storage.local.get(['config']);
-    const localHistory = (storage.config && storage.config.lotteryHistory) || [];
+    return fetchLotteryLogWithLocal(storage.config);
+}
+
+// 同 fetchLotteryLog，但本机流水由调用方传入（已持有 config 时免去再读一次存储）
+async function fetchLotteryLogWithLocal(config) {
+    const localHistory = (config && config.lotteryHistory) || [];
 
     const byDay = new Map();
     for (const record of localHistory) {
@@ -1190,7 +1196,9 @@ async function fetchLotteryLog() {
         if (!key.startsWith('lottery:') || !value || !value.date) {
             continue;
         }
-        const day = key.slice('lottery:'.length);
+        // 归属日以记录自身的 date 为准，而不是 key：旧版本按设备本地时区写过 key，
+        // 跨时区设备上可能差一天，按 date 重算可以把它们归到正确的日子
+        const day = toDateKey(value.date) || key.slice('lottery:'.length);
         const existing = byDay.get(day);
         if (!existing) {
             byDay.set(day, value);
@@ -1204,6 +1212,25 @@ async function fetchLotteryLog() {
 
 // 把抽奖结果写入 config（lotteryResult 单条 + lotteryHistory 最近90条）
 // 写前必须读全量 config —— storage 是整体替换
+// 今天的抽奖结果：本机流水 ∪ 同步记录里今天的记录，**中奖优先**，
+// 否则取最新一条。这样本机没抽、但其他设备抽中的记录，popup 也能显示，
+// 且本机后跑的 skipped 不会把别处的中奖盖掉。
+// （设置页抽奖日历仍走 fetchLotteryLog，保持「同天取最新一次尝试」的原口径）
+async function getTodayLotteryResult(config) {
+    const log = await fetchLotteryLogWithLocal(config);
+    const today = toDateKey(new Date());
+    const todays = log.filter(record => toDateKey(record.date) === today);
+
+    // 本地已有的今日中奖记录也是候选：它可能来自上一次聚合（含其他设备），
+    // 而本机流水 / sync 里的同一条可能已被后来的 skipped 覆盖
+    const prev = config && config.lotteryResult;
+    if (prev && toDateKey(prev.date) === today && prev.status === 'won') {
+        todays.unshift(prev);
+    }
+
+    return todays.find(record => record.status === 'won') || todays[0] || null;
+}
+
 async function saveLotteryResult(lottery) {
     try {
         const storage = await chrome.storage.local.get(['config']);
@@ -1221,9 +1248,9 @@ async function saveLotteryResult(lottery) {
 
         // 同一天已有中奖记录时，别让后续的 skipped / failed 覆盖它
         const prev = config.lotteryResult;
-        const sameDay = prev && new Date(prev.date).toDateString() === new Date(record.date).toDateString();
+        // 同一天按 UTC+8 判定，避免设备时区不同把跨零点记录判成两天
+        const sameDay = prev && toDateKey(prev.date) === toDateKey(record.date);
         const keepsPrevWin = sameDay && prev.status === 'won' && record.status !== 'won';
-
         if (!keepsPrevWin) {
             config.lotteryResult = record;
         }
@@ -1231,20 +1258,43 @@ async function saveLotteryResult(lottery) {
         // 历史仍完整记录每次尝试（含 skipped）
         config.lotteryHistory = [record, ...(config.lotteryHistory || [])].slice(0, 90);
 
-        await chrome.storage.local.set({ config });
-        console.log('✅ 抽奖结果已保存:', record);
-
         // 同步到其他设备：按天一个 key，规避 chrome.storage.sync 单项 8KB 限制。
         // 未登录 Chrome 账号时 sync 退化为本地存储，不会报错。
         if (config.syncLottery !== false) {
             try {
                 const syncKey = 'lottery:' + toDateKey(record.date);
-                await chrome.storage.sync.set({ [syncKey]: record });
-                console.log('🔄 抽奖记录已同步:', syncKey);
+                // 关键：别的设备今天已经抽中时，本机后跑的 skipped/failed 不能写回去，
+                // 否则会把对方的中奖记录覆盖掉，两边 popup 都看不到奖品
+                const existing = (await chrome.storage.sync.get([syncKey]))[syncKey];
+                const keepExistingWin = existing
+                    && existing.status === 'won'
+                    && record.status !== 'won';
+
+                if (keepExistingWin) {
+                    console.log('ℹ️ 其他设备今日已中奖，保留其同步记录:', existing.prizeName);
+                } else {
+                    await chrome.storage.sync.set({ [syncKey]: record });
+                    console.log('🔄 抽奖记录已同步:', syncKey);
+                }
             } catch (error) {
                 console.log('ℹ️ 抽奖记录同步失败:', error.message);
             }
         }
+
+        // lotteryResult 取「本机 ∪ 同步」聚合后的今天记录：其他设备先抽中的话，
+        // 本机后跑的 skipped 不应把它盖掉，popup 才能在两边都显示「抽中」。
+        // 单独 try 住：聚合失败（如 storage.sync 不可用）不能让本次结果连本地都存不下
+        try {
+            const todayResult = await getTodayLotteryResult(config);
+            if (todayResult) {
+                config.lotteryResult = todayResult;
+            }
+        } catch (error) {
+            console.log('ℹ️ 聚合今日抽奖结果失败，保留本次记录:', error.message);
+        }
+
+        await chrome.storage.local.set({ config });
+        console.log('✅ 抽奖结果已保存:', record);
 
         return record;
     } catch (error) {
@@ -1466,6 +1516,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // 保持消息通道开启
     }
 
+    if (request.action === 'getTodayLottery') {
+        // popup 渲染「🎁 抽中：xxx」：本机没抽、但其他设备同步来的中奖记录也要显示
+        chrome.storage.local.get(['config'], (result) => {
+            getTodayLotteryResult(result.config).then(record => {
+                sendResponse({ record });
+            }).catch(error => {
+                sendResponse({ record: null, reason: error.message });
+            });
+        });
+        return true;
+    }
+
     if (request.action === 'getConfig') {
         // 获取配置
         chrome.storage.local.get(['config'], (result) => {
@@ -1504,11 +1566,60 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
+// 其他设备经由 chrome.storage.sync 同步来的抽奖记录到达时，把今天的聚合结果
+// 补写进本地 lotteryResult，popup 才能显示别处抽中的奖品（best-effort）
+async function refreshLotteryResultFromSync() {
+    try {
+        const { config } = await chrome.storage.local.get(['config']);
+        if (!config) {
+            return;
+        }
+        const todayResult = await getTodayLotteryResult(config);
+        if (!todayResult || todayResult.status !== 'won') {
+            return;
+        }
+        const prev = config.lotteryResult;
+        const samePrize = prev
+            && prev.status === 'won'
+            && prev.prizeName === todayResult.prizeName
+            && toDateKey(prev.date) === toDateKey(todayResult.date);
+        if (samePrize) {
+            return;
+        }
+
+        // 重新读取最新配置再合并：聚合过程有 await，期间签到流程可能已写入
+        // lotteryHistory / lastCheckInDate，用旧快照整体写回会把它们冲掉
+        const latest = await chrome.storage.local.get(['config']);
+        const merged = { ...DEFAULT_CONFIG, ...(latest.config || {}) };
+        merged.lotteryResult = todayResult;
+        await chrome.storage.local.set({ config: merged });
+        console.log('🔄 已同步其他设备的今日抽奖结果:', todayResult.prizeName);
+    } catch (error) {
+        console.log('ℹ️ 同步抽奖结果回写失败:', error.message);
+    }
+}
+
 // 监听存储变化（用于配置更新时重设闹钟）
 chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync') {
+        const lotteryChanged = Object.keys(changes).some(key => key.startsWith('lottery:'));
+        if (lotteryChanged) {
+            refreshLotteryResultFromSync();
+        }
+        return;
+    }
+
     if (area === 'local' && changes.config) {
         const newConfig = changes.config.newValue;
-        if (newConfig && newConfig.checkInTime) {
+        const oldConfig = changes.config.oldValue || {};
+        if (!newConfig) {
+            return;
+        }
+        // 只有影响闹钟的字段真的变了才重建。否则每次写 lotteryHistory /
+        // lastCheckInDate 都会重算 dailyCheckIn 的 when，可能把当天的闹钟推掉
+        const timeChanged = newConfig.checkInTime !== oldConfig.checkInTime;
+        const enabledChanged = newConfig.enabled !== oldConfig.enabled;
+        if (timeChanged || enabledChanged) {
             setupDailyAlarm();
         }
     }
