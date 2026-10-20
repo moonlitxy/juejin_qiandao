@@ -646,7 +646,8 @@ async function fetchCheckInCountsFromServer() {
     }
 }
 
-// 用服务端连续签到天数覆盖本地值（断签时服务端会自行重置，天然正确）
+// 用服务端签到统计覆盖本地值（连续天数 + 累计天数，同一次 get_counts 返回）
+// 断签时服务端会自行重置连续天数，天然正确；累计天数是单调递增的历史总数
 // 返回 true 表示本地被更新
 // baseConfig：调用方（签到成功路径）手里刚更新的配置对象。传入时直接更新它并落库，
 // 不再自己读一遍存储——避免读到旧快照后又整份写回，冲掉并发改动
@@ -657,14 +658,20 @@ async function syncConsecutiveDaysFromServer(baseConfig = null) {
         return false;
     }
 
-    if (baseConfig && (baseConfig.consecutiveDays || 0) !== counts.contCount) {
-        baseConfig.consecutiveDays = counts.contCount;
-        await chrome.storage.local.set({ config: baseConfig });
-        console.log('🔄 连续签到天数已按服务端更新为', counts.contCount);
-        return true;
+    const patch = { consecutiveDays: counts.contCount };
+    if (Number.isInteger(counts.sumCount)) {
+        patch.totalCheckInDays = counts.sumCount;
     }
+
     if (baseConfig) {
-        return false;
+        const changed = Object.entries(patch).some(([k, v]) => (baseConfig[k] || 0) !== v);
+        if (!changed) {
+            return false;
+        }
+        Object.assign(baseConfig, patch);
+        await chrome.storage.local.set({ config: baseConfig });
+        console.log('🔄 签到统计已按服务端更新:', JSON.stringify(patch));
+        return true;
     }
 
     const storage = await chrome.storage.local.get(['config']);
@@ -673,13 +680,14 @@ async function syncConsecutiveDaysFromServer(baseConfig = null) {
     }
 
     const config = { ...DEFAULT_CONFIG, ...storage.config };
-    if (config.consecutiveDays === counts.contCount) {
+    const changed = Object.entries(patch).some(([k, v]) => (config[k] || 0) !== v);
+    if (!changed) {
         return false;
     }
 
-    config.consecutiveDays = counts.contCount;
+    Object.assign(config, patch);
     await chrome.storage.local.set({ config });
-    console.log('🔄 连续签到天数已按服务端更新为', counts.contCount);
+    console.log('🔄 签到统计已按服务端更新:', JSON.stringify(patch));
     return true;
 }
 

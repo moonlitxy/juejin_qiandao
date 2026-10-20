@@ -11,6 +11,7 @@ const elements = {
     lotteryText: null,
     consecutiveDays: null,
     totalDays: null,
+    sumDays: null,
     currentPoint: null,
     lastCheckInTime: null,
     manualCheckInBtn: null,
@@ -57,6 +58,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lotteryText = document.getElementById('lotteryText');
     elements.consecutiveDays = document.getElementById('consecutiveDays');
     elements.totalDays = document.getElementById('totalDays');
+    elements.sumDays = document.getElementById('sumDays');
     elements.currentPoint = document.getElementById('currentPoint');
     elements.lastCheckInTime = document.getElementById('lastCheckInTime');
     elements.manualCheckInBtn = document.getElementById('manualCheckInBtn');
@@ -282,15 +284,23 @@ function updateStatistics(config) {
     }
 
     elements.totalDays.textContent = totalDays;
+
+    // 累计签到天数：同样以服务端 get_counts 的 sum_count 为准（随连续天数一起同步）
+    elements.sumDays.textContent = Number.isInteger(config.totalCheckInDays)
+        ? config.totalCheckInDays
+        : 0;
 }
 
-// 从 background 取今日抽奖结果（本机流水 ∪ 其他设备同步记录）并渲染
+// 从 background 取今日抽奖结果（本机流水 ∪ 其他设备同步记录）并渲染。
+// sendMessage 内部已对 service worker 未就绪的瞬时失败做了一次重试，
+// 走到这里说明后台确实不可用，沿用本地记录即可。
 async function refreshLotteryStatus() {
     try {
         const response = await sendMessage({ action: 'getTodayLottery' });
         updateLotteryStatus({ lotteryResult: response && response.record });
     } catch (error) {
-        console.warn('获取今日抽奖结果失败:', error);
+        // 退化为 warning：界面已回退本地记录，功能不受影响
+        console.warn('获取今日抽奖结果失败（已回退本地记录）:', describeError(error));
         // 后台不可用时退回本地记录
         loadConfig().then(config => updateLotteryStatus(config));
     }

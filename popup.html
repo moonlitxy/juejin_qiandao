@@ -8,11 +8,15 @@
 </head>
 <body>
     <div class="container">
-        <!-- 头部 -->
+        <!-- 头部：左侧标题，右侧上次签到 + 设置入口 -->
         <div class="header">
             <div class="logo">
                 <span class="logo-icon">⛏️</span>
                 <h1>掘金自动签到</h1>
+            </div>
+            <div class="header-actions">
+                <span class="header-info" id="lastCheckInTime">上次签到: 从未</span>
+                <button class="btn-text" id="optionsBtn" title="设置">⚙️</button>
             </div>
         </div>
 
@@ -46,7 +50,11 @@
                 <div class="stat-label">本月签到天数</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value compact" id="currentPoint">-</div>
+                <div class="stat-value" id="sumDays">0</div>
+                <div class="stat-label">累计签到天数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="currentPoint">-</div>
                 <div class="stat-label">当前矿石</div>
             </div>
         </div>
@@ -76,14 +84,6 @@
                 <label class="setting-label">签到时间</label>
                 <input type="time" class="time-input" id="checkInTime" value="09:00">
             </div>
-        </div>
-
-        <!-- 底部信息 -->
-        <div class="footer">
-            <div class="footer-info">
-                <span id="lastCheckInTime">上次签到: 从未</span>
-            </div>
-            <button class="btn-text" id="optionsBtn">⚙️ 设置</button>
         </div>
     </div>
 

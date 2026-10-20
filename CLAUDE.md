@@ -24,6 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run test:lottery` —— 跑 [tests/simulate-lottery.js](tests/simulate-lottery.js)（约 1 秒）。以 vm 沙箱 + 假 chrome API/fetch 加载 `background.js`，断言抽奖门禁（无免费次数不抽、也不发 draw 请求）、奖品名取自 `lottery_name`、`err_no:400` 归为跳过、当天已有中奖记录不被后续 skipped 覆盖、其他设备同步来的今日中奖能在本机 popup 显示（本机 skipped 不覆盖同步中奖）。改抽奖逻辑后必须跑。
 - `npm run test:missed` —— 跑 [tests/simulate-missed-checkin.js](tests/simulate-missed-checkin.js)（约 1 秒）。断言过点未签巡查：过点未签才补、已签/未到点/开关关闭不补、已有进行中的签到让路、开关状态决定巡查闹钟的创建与清理、签到落库后清掉巡查闹钟。改巡查或 `updateCheckInHistory` 后必须跑。
 - `npm run test:date` —— 跑 [tests/simulate-date-key.js](tests/simulate-date-key.js)（约 1 秒）。断言抽奖日期归属按 UTC+8 计算且与设备时区无关（用子进程切换 `TZ` 覆盖 UTC-7 / UTC+8 / UTC+9 / UTC），含跨天、跨月、跨年边界。改 `shared/date.js` 或同步 key 逻辑后必须跑。
+- `npm run test:stats` —— 跑 [tests/simulate-checkin-stats.js](tests/simulate-checkin-stats.js)（约 1 秒）。断言连续天数（`cont_count`）与累计天数（`sum_count`）取自同一次 `get_counts`、无变化时不写存储、服务端失败/字段缺失时保留本地值。改统计同步逻辑后必须跑。
 - `node e2e-checkin.js` —— 真机端到端（需先 `npm install` + `npx playwright install chromium`）。Playwright 用命令行 `--load-extension` 把插件装进独立临时 profile，跑 `manualCheckIn` 并断言 popup 文案。**必须用 Playwright 自带的 Chromium**：本机 Chrome 152+ 已彻底禁用命令行 `--load-extension`。首次运行需在弹出的窗口里登录掘金，登录态持久化在 `$TMPDIR/juejin-qiandao-e2e-profile`。
 - 真机手动验证：`chrome://extensions` 开发者模式 → Load unpacked 加载本目录。
 
@@ -255,6 +256,7 @@ MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content sc
         lastCheckInDate: null,      // 最后签到日期（用于判断今日是否已签到）
         checkInHistory: [],         // 签到历史记录（最近30天）
         consecutiveDays: 0,         // 连续签到天数（以服务端 get_counts 的 cont_count 为准）
+        totalCheckInDays: 0,        // 累计签到天数（服务端 get_counts 的 sum_count，popup 展示）
         monthCheckInCount: 0,       // 本月签到天数（以服务端 get_by_month 统计为准）
         monthCheckInMonth: null,    // 上面的统计所属月份（'YYYY-MM'，跨月需重新拉取）
         successNotification: true,  // 成功桌面通知开关（background notifySuccess 消费）
@@ -269,7 +271,7 @@ MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content sc
 }
 ```
 
-`consecutiveDays` / `monthCheckInCount` **以服务端为准**，本地推算只是兜底：`syncConsecutiveDaysFromServer()` 用 `cont_count` 覆盖本地值（断签由服务端自行重置）；`syncMonthCountFromServer()` 用 `get_by_month` 统计。**调用顺序有讲究**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则本地推算出的 0 会把服务端值冲掉（见 `finalizeCheckInSuccess` / `syncCheckInStatusFromServer`）。popup 侧用 `monthCheckInMonth === 'YYYY-MM'` 判断该统计是否可用于当前月，不符则回退本地历史推算。
+`consecutiveDays` / `totalCheckInDays` / `monthCheckInCount` **以服务端为准**，本地推算只是兜底：`syncConsecutiveDaysFromServer()` 用同一次 `get_counts` 的 `cont_count` 与 `sum_count` 分别覆盖连续天数（断签由服务端自行重置）和累计天数（单调递增的历史总数，popup 的「累计签到天数」用它），两项共用一次请求、值没变就不写存储；`syncMonthCountFromServer()` 用 `get_by_month` 统计。**调用顺序有讲究**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则本地推算出的 0 会把服务端值冲掉（见 `finalizeCheckInSuccess` / `syncCheckInStatusFromServer`）。popup 侧用 `monthCheckInMonth === 'YYYY-MM'` 判断该统计是否可用于当前月，不符则回退本地历史推算。
 
 另用 `chrome.storage.session` 存 `checkInRetry`（重试恢复状态，见上节）。
 

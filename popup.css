@@ -20,17 +20,22 @@ body {
     height: 100%;
 }
 
-/* 头部样式 */
+/* 头部：标题与右侧信息/设置同排，设置入口始终可见（不随内容滚出视野） */
 .header {
     background: rgba(255, 255, 255, 0.95);
     padding: 16px 20px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .logo {
     display: flex;
     align-items: center;
     gap: 12px;
+    min-width: 0;
 }
 
 .logo-icon {
@@ -41,17 +46,33 @@ body {
     font-size: 18px;
     font-weight: 600;
     color: #333;
+    white-space: nowrap;
 }
 
-/* 状态卡片 */
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.header-info {
+    font-size: 12px;
+    color: #666;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 状态卡片：贴紧头部，去掉上方留白 */
 .status-section {
-    padding: 20px;
+    padding: 12px 20px 20px;
 }
 
 .status-card {
     background: rgba(255, 255, 255, 0.95);
     border-radius: 12px;
-    padding: 20px;
+    padding: 16px 20px;
     display: flex;
     align-items: center;
     gap: 16px;
@@ -94,16 +115,17 @@ body {
     color: #666;
 }
 
-/* 统计信息 */
+/* 统计信息：两行两列，四个指标各自有足够宽度 */
 .stats-section {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
     padding: 0 20px;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
 }
 
 .stat-item {
-    flex: 1;
+    flex: 1 1 calc(50% - 5px);
     background: rgba(255, 255, 255, 0.95);
     border-radius: 8px;
     padding: 12px 8px;
@@ -112,20 +134,17 @@ body {
 }
 
 .stat-value {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
     color: #667eea;
     margin-bottom: 4px;
-}
-
-/* 矿石数位数较多，缩小字号避免挤破三栏布局 */
-.stat-value.compact {
-    font-size: 20px;
-    line-height: 34px;
+    /* 位数多了（累计上千天 / 矿石上万）也不撑破窄栏 */
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .stat-label {
-    font-size: 11px;
+    font-size: 10px;
     color: #666;
     white-space: nowrap;
 }
@@ -297,20 +316,6 @@ input:checked + .slider:before {
 }
 
 /* 底部 */
-.footer {
-    margin-top: auto;
-    background: rgba(255, 255, 255, 0.95);
-    padding: 12px 20px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.footer-info {
-    font-size: 12px;
-    color: #666;
-}
-
 .btn-text {
     background: none;
     border: none;
