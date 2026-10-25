@@ -39,7 +39,7 @@
 
 扩展的 `chrome.alarms` 依赖本机浏览器常驻，**电脑关机/休眠/断网就漏签**（已实测断过签）。所以另有一套云端签到，两边**天然幂等不冲突**（重复签到返回 `15001`，都判 `alreadyCheckedIn`）。扩展的连续/累计/本月天数以服务端为准，popup 打开时会自动同步云端结果。
 
-- 入口：`.github/workflows/checkin.yml`（workflow 名「掘金签到」），核心逻辑 `scripts/checkin.mjs`。**`schedule` 已启用**：`cron: '20 0 * * *'` → 北京时间每天 8:20；另有 `workflow_dispatch`（可勾 `dry_run` 只查状态）。改签到时间只改这一行，注意 cron 是 UTC。
+- 入口：`.github/workflows/checkin.yml`（workflow 名「掘金签到」），核心逻辑 `scripts/checkin.mjs`。**`schedule` 已启用**：`cron: '0 20 * * *'` → 北京时间每天 4:00；另有 `workflow_dispatch`（可勾 `dry_run` 只查状态）。改签到时间只改这一行，注意 cron 是 UTC。
 - `.github/workflows/schedule-probe.yml` 是临时诊断 workflow（每 5 分钟），用于确认仓库级 schedule 是否触发；查清后应删除。
 - 本地跑：`JUEJIN_COOKIE='...' node scripts/checkin.mjs`，`--dry-run` 只查询不签到，`--headed` 显示浏览器。Cookie 只从环境变量读，日志只回显长度。
 - **云端签到必须用 Playwright，不能用纯 fetch/curl**：`POST growth_api/v1/check_in` 依赖 `x-secsdk-csrf-token`（字节 X-Ware-Csrf-Token）+ `msToken` / `ttwid` 风控 cookie。**缺失时接口返回 HTTP 200 + 空 body**（不是报错，极易误判成功），必须加载真实页面让 JS 种出参数，再在页面上下文（MAIN world）发请求。详见 `scripts/diagnose-post.mjs`。
