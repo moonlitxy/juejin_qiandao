@@ -188,6 +188,24 @@
                             <span class="slider"></span>
                         </label>
                     </div>
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">本机抽奖回传 GitHub</h3>
+                            <p class="setting-desc">本机抽中免费奖品后合并到云端结果文件（需要下方 Token）</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="githubLotterySyncToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">GitHub Token</h3>
+                            <p class="setting-desc">Fine-grained PAT，仅授予本仓库 Contents: Read and write；只保存在本机</p>
+                        </div>
+                        <input type="password" id="githubTokenInput" class="token-input"
+                               placeholder="github_pat_..." autocomplete="off">
+                    </div>
                 </div>
 
                 <div class="calendar-container">

@@ -24,6 +24,7 @@ const FORM_FIELDS = [
     { key: 'autoLottery', el: 'autoLotteryToggle', type: 'checked', fallback: v => v !== false },
     { key: 'syncLottery', el: 'lotterySyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'cloudLotterySync', el: 'cloudLotterySyncToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'githubLotterySync', el: 'githubLotterySyncToggle', type: 'checked', fallback: v => v === true },
     { key: 'successNotification', el: 'successNotification', type: 'checked', fallback: v => v },
     { key: 'failureNotification', el: 'failureNotification', type: 'checked', fallback: v => v },
     { key: 'retryCount', el: 'retryCount', type: 'value', fallback: v => v },
@@ -50,6 +51,8 @@ const elements = {
     lotteryNextMonth: null,
     lotterySyncToggle: null,
     cloudLotterySyncToggle: null,
+    githubLotterySyncToggle: null,
+    githubTokenInput: null,
     saveBtn: null,
     resetBtn: null,
     clearHistoryBtn: null,
@@ -78,6 +81,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lotteryNextMonth = document.getElementById('lotteryNextMonth');
     elements.lotterySyncToggle = document.getElementById('lotterySyncToggle');
     elements.cloudLotterySyncToggle = document.getElementById('cloudLotterySyncToggle');
+    elements.githubLotterySyncToggle = document.getElementById('githubLotterySyncToggle');
+    elements.githubTokenInput = document.getElementById('githubTokenInput');
     elements.saveBtn = document.getElementById('saveBtn');
     elements.resetBtn = document.getElementById('resetBtn');
     elements.clearHistoryBtn = document.getElementById('clearHistoryBtn');
@@ -89,6 +94,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 加载配置
     await loadConfig();
+
+    // Token 只回显「已配置」状态，不把原文写回输入框
+    await loadGitHubTokenStatus();
 
     // 加载签到日历（服务端本月明细）
     await loadCalendar();
@@ -123,6 +131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             refreshFormFromStorage();
+            loadGitHubTokenStatus();
         }
     });
 });
@@ -300,6 +309,7 @@ async function saveConfig() {
             autoLottery: elements.autoLotteryToggle.checked,
             syncLottery: elements.lotterySyncToggle.checked,
             cloudLotterySync: elements.cloudLotterySyncToggle.checked,
+            githubLotterySync: elements.githubLotterySyncToggle.checked,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,
             retryCount: parseInt(elements.retryCount.value),
@@ -312,6 +322,17 @@ async function saveConfig() {
             config: newConfig
         });
 
+        // Token 单独保存，不进 config / chrome.storage.sync
+        const token = elements.githubTokenInput.value.trim();
+        if (token) {
+            const tokenResult = await sendMessage({ action: 'saveGitHubToken', token });
+            if (!tokenResult || !tokenResult.success) {
+                throw new Error((tokenResult && tokenResult.message) || 'GitHub Token 保存失败');
+            }
+            elements.githubTokenInput.value = '';
+            elements.githubTokenInput.placeholder = '已配置（输入新 Token 可替换）';
+        }
+
         // 更新当前配置：合并而非替换，保留不在表单里的字段
         // （lastCheckInDate / checkInHistory / consecutiveDays）
         currentConfig = { ...currentConfig, ...newConfig };
@@ -321,6 +342,18 @@ async function saveConfig() {
     } catch (error) {
         console.error('保存配置失败:', error);
         showPageNotification('保存配置失败', 'error');
+    }
+}
+
+// 读取 Token 配置状态：只关心是否已设置，绝不显示原文
+async function loadGitHubTokenStatus() {
+    try {
+        const result = await sendMessage({ action: 'getGitHubTokenStatus' });
+        elements.githubTokenInput.placeholder = result && result.configured
+            ? '已配置（输入新 Token 可替换）'
+            : 'github_pat_...';
+    } catch (error) {
+        console.warn('读取 GitHub Token 状态失败:', error);
     }
 }
 

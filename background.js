@@ -15,6 +15,9 @@ const PENDING_CHECK_IN_RETRY_MIN = 10;
 // 云端签到/抽奖结果文件（public 仓库，内容不含 Cookie）
 const CLOUD_RESULT_URL = 'https://raw.githubusercontent.com/moonlitxy/juejin_qiandao/main/.cloud/checkin-lottery.json';
 const CLOUD_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const CLOUD_RESULT_PATH = '.cloud/checkin-lottery.json';
+const CLOUD_RESULT_HISTORY_LIMIT = 90;
+const GITHUB_TOKEN_STORAGE_KEY = 'githubLotteryToken';
 let lastCloudSyncAt = 0;
 
 // 当前正在执行的签到流程（'auto' / 'manual'）。
@@ -539,7 +542,13 @@ async function finalizeCheckInSuccess(result, config, tabId = null) {
     let lottery = null;
     if (shouldRunLocalLottery(config) && typeof tabId === 'number') {
         lottery = await runLottery(tabId);
-        await saveLotteryResult(lottery);
+        const saved = await saveLotteryResult(lottery);
+
+        // 本机用掉免费次数后把结果回传 GitHub；只回传真正抽中的记录，
+        // 失败/无次数没有同步价值。best-effort，失败不影响签到与抽奖结果。
+        if (saved && lottery.status === 'won') {
+            await syncLotteryResultToGitHub(saved).catch(() => {});
+        }
 
         // 抽到奖品或抽奖失败时补一次广播，让已打开的 popup 刷新抽奖行
         if (lottery.status === 'won' || lottery.status === 'failed') {
@@ -1384,6 +1393,33 @@ async function syncCloudCheckInResult(force = false) {
         // 同一天优先中奖；否则取最新一条（失败/跳过也可用于诊断）
         const cloudRecord = todayRecords.find(record => record.status === 'won') || todayRecords[0];
 
+        // 云端和本机都可能在同一天抽中，合并后的流水要保留全部中奖记录，
+        // 不能只留下 popup 展示用的那一条，否则 GitHub 文件回拉后会丢本地奖品
+        const winningRecords = todayRecords.filter(record => record.status === 'won');
+        if (winningRecords.length > 0) {
+            const history = [...(merged.lotteryHistory || [])];
+            for (const record of winningRecords) {
+                const exists = history.some(item =>
+                    item && item.date === record.date && item.status === 'won'
+                    && item.prizeName === (record.prizeName || null));
+                if (!exists) {
+                    history.push({
+                        date: record.date,
+                        status: 'won',
+                        prizeName: record.prizeName || null,
+                        prizeImage: record.prizeImage || null,
+                        lotteryType: record.lotteryType ?? null,
+                        message: record.message || '',
+                        freeCount: record.freeCount ?? null,
+                        source: record.source || 'cloud'
+                    });
+                }
+            }
+            merged.lotteryHistory = history
+                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                .slice(0, 90);
+        }
+
         // 本地已有今日中奖时保留本地；否则以云端结果为准
         const localTodayWin = merged.lotteryResult
             && merged.lotteryResult.status === 'won'
@@ -1438,6 +1474,127 @@ async function syncCloudCheckInResult(force = false) {
         console.log('ℹ️ 云端抽奖结果同步失败:', error.message);
         return false;
     }
+}
+
+/**
+ * 把本机抽中的免费奖品合并进 GitHub 仓库的云端结果文件。
+ *
+ * 使用 fine-grained PAT 直接走 GitHub Contents API：
+ * - 只允许该仓库 Contents: Read and write，不能操作其他仓库；
+ * - Token 单独存 chrome.storage.local，不进入 config，因此不会随
+ *   chrome.storage.sync 同步到其他设备；
+ * - 文件并发更新时用最新 SHA 重试一次，避免覆盖 Actions 刚写的结果。
+ */
+async function syncLotteryResultToGitHub(record) {
+    const storage = await chrome.storage.local.get(['config', GITHUB_TOKEN_STORAGE_KEY]);
+    const config = { ...DEFAULT_CONFIG, ...(storage.config || {}) };
+    const token = storage[GITHUB_TOKEN_STORAGE_KEY] || '';
+
+    if (config.githubLotterySync !== true) {
+        return false;
+    }
+    if (!token) {
+        console.log('ℹ️ 未配置 GitHub Token，跳过本机抽奖回传');
+        return false;
+    }
+    if (!/^[^/\s]+\/[^/\s]+$/.test(config.githubRepo || '')) {
+        console.log('ℹ️ GitHub 仓库格式无效，跳过本机抽奖回传');
+        return false;
+    }
+
+    const apiUrl = `https://api.github.com/repos/${config.githubRepo}/contents/${CLOUD_RESULT_PATH}`;
+    const headers = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+    };
+
+    // 最多重试一次：拿到最新 SHA 后重算，仍冲突就留给下次
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const getRes = await fetch(`${apiUrl}?ref=main&t=${Date.now()}`, {
+                headers,
+                cache: 'no-store'
+            });
+            if (!getRes.ok) {
+                throw new Error(`读取结果文件失败 HTTP ${getRes.status}`);
+            }
+            const file = await getRes.json();
+            const previous = JSON.parse(base64ToUtf8(file.content || ''));
+            const records = Array.isArray(previous.records) ? previous.records : [];
+
+            // 同一奖品（同日期+状态+奖品名）不重复写入
+            const duplicate = records.some(item =>
+                item && toDateKey(item.date) === toDateKey(record.date)
+                && item.status === record.status
+                && item.prizeName === record.prizeName);
+            if (duplicate) {
+                return false;
+            }
+
+            const normalized = {
+                date: record.date,
+                runId: `extension-${Date.now()}`,
+                status: record.status,
+                prizeName: record.prizeName || null,
+                prizeImage: record.prizeImage || null,
+                lotteryType: record.lotteryType ?? null,
+                message: record.message || '',
+                freeCount: record.freeCount ?? null,
+                source: 'extension'
+            };
+            const payload = {
+                version: 1,
+                ...previous,
+                updatedAt: new Date().toISOString(),
+                latestCheckIn: previous.latestCheckIn || null,
+                records: [normalized, ...records].slice(0, CLOUD_RESULT_HISTORY_LIMIT)
+            };
+
+            const putRes = await fetch(apiUrl, {
+                method: 'PUT',
+                headers: { ...headers, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: `chore: 同步本机抽奖奖品 ${normalized.prizeName || ''}`.trim(),
+                    content: utf8ToBase64(JSON.stringify(payload, null, 2) + '\n'),
+                    sha: file.sha,
+                    branch: 'main'
+                })
+            });
+
+            if (putRes.ok) {
+                console.log('🔄 本机抽奖结果已回传 GitHub:', normalized.prizeName);
+                // raw.githubusercontent.com 有 CDN 缓存，稍后再拉一次，
+                // 让本机回传的记录与云端文件合并且不被旧内容覆盖
+                lastCloudSyncAt = 0;
+                return true;
+            }
+            if (putRes.status !== 409 && putRes.status !== 422) {
+                throw new Error(`写入结果文件失败 HTTP ${putRes.status}`);
+            }
+            // SHA 冲突：下一轮重新读取最新文件后重试
+        } catch (error) {
+            if (attempt === 1) {
+                console.log('ℹ️ 本机抽奖回传 GitHub 失败:', error.message);
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+// Chrome 扩展没有 atob/btoa 之外的依赖，这里处理 UTF-8 奖品名
+function utf8ToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+    return btoa(binary);
+}
+
+function base64ToUtf8(base64) {
+    const binary = atob(base64.replace(/\s/g, ''));
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
 }
 
 // 等待标签页加载完成（使用事件监听，避免轮询）
@@ -1703,6 +1860,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 setupDailyAlarm(); // 重新设置闹钟
                 sendResponse({ success: true });
             });
+        });
+        return true;
+    }
+
+    if (request.action === 'getGitHubTokenStatus') {
+        // 只返回是否已配置，绝不把 Token 原文送到设置页
+        chrome.storage.local.get([GITHUB_TOKEN_STORAGE_KEY], (result) => {
+            sendResponse({ configured: !!result[GITHUB_TOKEN_STORAGE_KEY] });
+        });
+        return true;
+    }
+
+    if (request.action === 'saveGitHubToken') {
+        // Token 单独存，不写进 config：config 会同步到 UI，也更容易被误导出
+        const token = String(request.token || '').trim();
+        if (!token) {
+            chrome.storage.local.remove(GITHUB_TOKEN_STORAGE_KEY, () => {
+                sendResponse({ success: true, configured: false });
+            });
+            return true;
+        }
+        if (!/^github_pat_|^ghp_/.test(token)) {
+            sendResponse({ success: false, message: 'Token 格式不正确，请使用 GitHub PAT' });
+            return true;
+        }
+        chrome.storage.local.set({ [GITHUB_TOKEN_STORAGE_KEY]: token }, () => {
+            sendResponse({ success: true, configured: true });
         });
         return true;
     }

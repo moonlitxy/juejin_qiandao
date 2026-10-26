@@ -149,7 +149,8 @@ input:checked + .slider:before {
 
 /* 输入框 */
 .time-input,
-.select-input {
+.select-input,
+.token-input {
     padding: 8px 12px;
     border: 1px solid #ddd;
     border-radius: 6px;
@@ -161,13 +162,19 @@ input:checked + .slider:before {
 }
 
 .time-input:focus,
-.select-input:focus {
+.select-input:focus,
+.token-input:focus {
     outline: none;
     border-color: #667eea;
 }
 
 .select-input {
     min-width: 100px;
+}
+
+.token-input {
+    width: 260px;
+    cursor: text;
 }
 
 /* 立即签到按钮（设置页） */
