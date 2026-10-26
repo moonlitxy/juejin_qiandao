@@ -20,10 +20,21 @@
  */
 
 import { chromium } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
+import { runLottery, getLotteryConfig } from './cloud-lottery.mjs';
 
 const COOKIE = process.env.JUEJIN_COOKIE || '';
 const DRY_RUN = process.argv.includes('--dry-run');
 const HEADED = process.argv.includes('--headed');
+// Actions 里把云端签到/抽奖结果写到仓库文件，供扩展拉取展示。
+// 本地运行时默认不写，避免误改工作区。
+const RESULT_FILE = process.env.CLOUD_RESULT_FILE || '';
+const RUN_ID = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT]
+    .filter(Boolean)
+    .join('-');
+const RESULT_HISTORY_LIMIT = 90;
+const LOTTERY_TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 // 签到入口页：加载它是为了让页面 JS 种下 msToken / ttwid / x-secsdk-csrf-token
 const PAGE_URL = 'https://juejin.cn/pins';
@@ -114,6 +125,68 @@ const PATH_LOGIN = '/growth_api/v1/get_cur_point';
 const PATH_TODAY = '/growth_api/v2/get_today_status';
 const PATH_CHECKIN = '/growth_api/v1/check_in';
 const PATH_COUNTS = '/growth_api/v1/get_counts';
+const PATH_LOTTERY_CONFIG = '/growth_api/v1/lottery_config/get';
+
+/** 抽奖日期归属与扩展保持一致：固定按 UTC+8 计算 */
+function toDateKey(input) {
+    const date = input instanceof Date ? input : new Date(input);
+    if (Number.isNaN(date.getTime())) {
+        return null;
+    }
+    return new Date(date.getTime() + LOTTERY_TZ_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** 读取上一次的云端结果，保留最近 90 条，便于扩展补拉漏掉的日期 */
+function readCloudResult() {
+    if (!RESULT_FILE || !fs.existsSync(RESULT_FILE)) {
+        return { version: 1, records: [] };
+    }
+    try {
+        const data = JSON.parse(fs.readFileSync(RESULT_FILE, 'utf8'));
+        return {
+            version: 1,
+            ...data,
+            records: Array.isArray(data.records) ? data.records : []
+        };
+    } catch (error) {
+        console.warn(`⚠️ 云端结果文件无法解析，将重新生成: ${error.message}`);
+        return { version: 1, records: [] };
+    }
+}
+
+/**
+ * 写入云端结果。抽奖记录按 runId 去重，失败/跳过也保留，
+ * 扩展端可以据此展示“无免费次数”和异常原因。
+ */
+function writeCloudResult(checkIn, lottery) {
+    if (!RESULT_FILE) {
+        return;
+    }
+
+    const previous = readCloudResult();
+    const records = previous.records.filter((record) => {
+        if (!lottery || !lottery.runId) {
+            return true;
+        }
+        return record.runId !== lottery.runId;
+    });
+    if (lottery) {
+        records.unshift(lottery);
+    }
+
+    const payload = {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        latestCheckIn: checkIn,
+        records: records
+            .filter((record) => record && record.date && record.status)
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, RESULT_HISTORY_LIMIT)
+    };
+
+    fs.mkdirSync(path.dirname(RESULT_FILE), { recursive: true });
+    fs.writeFileSync(RESULT_FILE, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
 
 async function main() {
     if (!COOKIE) {
@@ -142,44 +215,83 @@ async function main() {
         // 线上字段为 check_in_done；today_status / has_check_in 为旧字段，保留兼容
         const alreadyCheckedIn = d.check_in_done === true || d.today_status === 1 || d.has_check_in === true;
 
+        const counts = await session.run(getCounts, PATH_COUNTS);
         const statOf = (counts) => counts.err_no === 0 && counts.data
             ? `连续 ${counts.data.cont_count} 天 / 累计 ${counts.data.sum_count} 天`
             : '统计获取失败';
-        const stat = statOf(await session.run(getCounts, PATH_COUNTS));
+        const stat = statOf(counts);
+        const checkInRecord = {
+            date: new Date().toISOString(),
+            status: alreadyCheckedIn ? 'already_checked' : 'checked',
+            contCount: counts.err_no === 0 && counts.data ? counts.data.cont_count : null,
+            sumCount: counts.err_no === 0 && counts.data ? counts.data.sum_count : null
+        };
 
         if (alreadyCheckedIn) {
             console.log('ℹ️ 今日已签到，跳过');
             console.log(`📊 ${stat}`);
-            return;
+        } else if (DRY_RUN) {
+            console.log('🔍 --dry-run 模式：今日未签到，但不下发签到请求');
+            console.log(`📊 ${stat}`);
+        } else {
+            const result = await session.run(postCheckIn, PATH_CHECKIN);
+            if (result.empty) {
+                throw new Error('签到接口返回空 body，通常意味着页面未注入 x-secsdk-csrf-token');
+            }
+            if (result.err_no === 0) {
+                console.log('✅ 签到成功');
+            } else if (result.err_no === 15001 || result.err_no === 10001 ||
+                result.err_msg?.includes('重复') || result.err_msg?.includes('已经')) {
+                console.log(`ℹ️ ${result.err_msg || '今天已经签到过了'}`);
+                checkInRecord.status = 'already_checked';
+            } else {
+                throw new Error(result.err_msg || `签到失败 (err_no: ${result.err_no})`);
+            }
+
+            // 复验，避免"接口说成功但实际没签"
+            const verify = await session.run(getTodayStatus, PATH_TODAY);
+            const vd = verify.data || {};
+            if (!(vd.check_in_done === true || vd.today_status === 1 || vd.has_check_in === true)) {
+                throw new Error('签到接口返回成功，但复验仍未签到');
+            }
+            console.log('🔍 复验通过');
+            const latestCounts = await session.run(getCounts, PATH_COUNTS);
+            console.log(`📊 ${statOf(latestCounts)}`);
+            if (latestCounts.err_no === 0 && latestCounts.data) {
+                checkInRecord.contCount = latestCounts.data.cont_count;
+                checkInRecord.sumCount = latestCounts.data.sum_count;
+            }
         }
 
         if (DRY_RUN) {
-            console.log('🔍 --dry-run 模式：今日未签到，但不下发签到请求');
-            console.log(`📊 ${stat}`);
+            const cfg = await session.run(getLotteryConfig, PATH_LOTTERY_CONFIG);
+            const raw = cfg.data && (cfg.data.free_count ?? cfg.data.free_time ?? cfg.data.lottery_free_count);
+            console.log(`🎰 --dry-run 模式：免费抽奖次数 ${raw ?? '未知'}，不执行抽奖`);
             return;
         }
 
-        const result = await session.run(postCheckIn, PATH_CHECKIN);
-        if (result.empty) {
-            throw new Error('签到接口返回空 body，通常意味着页面未注入 x-secsdk-csrf-token');
+        // 抽奖 best-effort：失败只告警，不把已经成功的签到判为失败
+        let lottery;
+        try {
+            lottery = await runLottery(session);
+        } catch (error) {
+            lottery = { status: 'failed', freeCount: null, message: `抽奖异常: ${error.message}` };
         }
-        if (result.err_no === 0) {
-            console.log('✅ 签到成功');
-        } else if (result.err_no === 15001 || result.err_no === 10001 ||
-            result.err_msg?.includes('重复') || result.err_msg?.includes('已经')) {
-            console.log(`ℹ️ ${result.err_msg || '今天已经签到过了'}`);
-        } else {
-            throw new Error(result.err_msg || `签到失败 (err_no: ${result.err_no})`);
+        if (lottery.status === 'failed') {
+            console.warn(`⚠️ 抽奖未完成: ${lottery.message}`);
         }
 
-        // 复验，避免"接口说成功但实际没签"
-        const verify = await session.run(getTodayStatus, PATH_TODAY);
-        const vd = verify.data || {};
-        if (!(vd.check_in_done === true || vd.today_status === 1 || vd.has_check_in === true)) {
-            throw new Error('签到接口返回成功，但复验仍未签到');
-        }
-        console.log('🔍 复验通过');
-        console.log(`📊 ${statOf(await session.run(getCounts, PATH_COUNTS))}`);
+        const lotteryRecord = {
+            date: new Date().toISOString(),
+            runId: RUN_ID || null,
+            status: lottery.status,
+            prizeName: lottery.prizeName || null,
+            prizeImage: lottery.prizeImage || null,
+            lotteryType: lottery.lotteryType ?? null,
+            message: lottery.message,
+            freeCount: lottery.freeCount ?? null
+        };
+        writeCloudResult(checkInRecord, lotteryRecord);
     } finally {
         await session.close();
     }

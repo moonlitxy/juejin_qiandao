@@ -21,7 +21,8 @@ const DEFAULT_CONFIG = {
     autoLottery: true,          // 自动抽奖开关（仅签到成功后生效）
     lotteryResult: null,        // 最近一次抽奖结果（供 popup 渲染）
     lotteryHistory: [],         // 抽奖历史记录（最近90条）
-    syncLottery: true           // 抽奖记录同步到其他设备（chrome.storage.sync）
+    syncLottery: true,          // 抽奖记录同步到其他设备（chrome.storage.sync）
+    cloudLotterySync: true      // 拉取 GitHub Actions 的云端抽奖结果
 };
 
 /**
@@ -44,5 +45,6 @@ const CONFIG_KEYS = {
     AUTO_LOTTERY: 'autoLottery',
     LOTTERY_RESULT: 'lotteryResult',
     LOTTERY_HISTORY: 'lotteryHistory',
-    SYNC_LOTTERY: 'syncLottery'
+    SYNC_LOTTERY: 'syncLottery',
+    CLOUD_LOTTERY_SYNC: 'cloudLotterySync'
 };

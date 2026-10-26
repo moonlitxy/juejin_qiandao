@@ -51,7 +51,7 @@
                     <div class="setting-item">
                         <div class="setting-info">
                             <h3 class="setting-label">自动抽奖</h3>
-                            <p class="setting-desc">签到成功后自动用掉当天的免费抽奖机会</p>
+                            <p class="setting-desc">本机签到成功后自动用掉当天的免费抽奖机会（开启云端抽奖时由云端执行）</p>
                         </div>
                         <label class="switch">
                             <input type="checkbox" id="autoLotteryToggle">
@@ -171,10 +171,20 @@
                     <div class="setting-item">
                         <div class="setting-info">
                             <h3 class="setting-label">同步到其他设备</h3>
-                            <p class="setting-desc">用 Chrome 账号同步抽奖记录（仅能同步本插件抽的奖）</p>
+                            <p class="setting-desc">用 Chrome 账号同步抽奖记录（含 GitHub Actions 云端抽奖）</p>
                         </div>
                         <label class="switch">
                             <input type="checkbox" id="lotterySyncToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <h3 class="setting-label">同步云端抽奖</h3>
+                            <p class="setting-desc">由 GitHub Actions 使用免费次数抽奖并拉取结果；开启后本机不再重复抽奖</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cloudLotterySyncToggle">
                             <span class="slider"></span>
                         </label>
                     </div>

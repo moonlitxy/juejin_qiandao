@@ -38,7 +38,13 @@ on:
     - cron: '0 20 * * *'
 
 permissions:
-  contents: read
+  # 需要写回云端签到/抽奖结果文件，供浏览器扩展拉取展示
+  contents: write
+
+# 同一时间只跑一个签到任务，避免两次运行同时抽奖或争抢结果文件
+concurrency:
+  group: juejin-checkin
+  cancel-in-progress: false
 
 jobs:
   checkin:
@@ -72,6 +78,7 @@ jobs:
           # 从 Secret 注入；不要用 set -x 或 echo，否则 Cookie 会进日志
           JUEJIN_COOKIE: ${{ secrets.JUEJIN_COOKIE }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CLOUD_RESULT_FILE: .cloud/checkin-lottery.json
         # 签到失败时以自定义摘要收尾，方便在通知邮件/Red 状态栏一眼看清原因
         run: |
           if node scripts/checkin.mjs ${{ inputs.dry_run && '--dry-run' || '' }}; then
@@ -81,3 +88,23 @@ jobs:
             echo "::error title=签到失败::请看上方日志。Cookie 失效时需更新 Settings → Secrets and variables → Actions → JUEJIN_COOKIE"
             exit 1
           fi
+
+      # 即使签到步骤失败，也尝试提交已生成的结果；没有变化时不会产生空提交
+      - name: 提交云端签到与抽奖结果
+        if: always() && inputs.dry_run != true
+        run: |
+          if [ ! -f .cloud/checkin-lottery.json ]; then
+            echo "没有生成云端结果文件，跳过提交"
+            exit 0
+          fi
+          if git diff --quiet -- .cloud/checkin-lottery.json; then
+            echo "云端结果没有变化，跳过提交"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .cloud/checkin-lottery.json
+          git commit -m "chore: 更新云端签到与抽奖结果"
+          # 定时任务可能处于 detached HEAD，显式推送到 main
+          git pull --rebase origin main
+          git push origin HEAD:main

@@ -102,11 +102,6 @@ const storageSync = {
 const noopListener = { addListener() {} };
 
 const chromeMock = {
-    runtime: {
-        onInstalled: noopListener,
-        onStartup: noopListener,
-        onMessage: noopListener,
-    },
     alarms: {
         onAlarm: noopListener,
         create() {},
@@ -116,6 +111,12 @@ const chromeMock = {
         sync: storageSync,
         session: { async get() { return {}; }, async set() {}, async remove() {} },
         onChanged: noopListener,
+    },
+    runtime: {
+        onInstalled: noopListener,
+        onStartup: noopListener,
+        onMessage: noopListener,
+        lastError: null,
     },
     notifications: { create() {} },
     tabs: {
@@ -164,8 +165,9 @@ function createContext() {
 
 // 在沙箱内执行一段代码并取回 __out 的结果
 // 源码与测试代码必须拼在同一个 script 里，顶层函数声明才可见
-async function runInSandbox(code) {
+async function runInSandbox(code, extraSandbox = {}) {
     const context = createContext();
+    Object.assign(context, extraSandbox);
     await vm.runInContext(`${source}\n;(async () => { ${code} })()`, context);
     return context.__out;
 }
@@ -257,6 +259,75 @@ async function main() {
     assert('本机 skipped 后 lotteryResult 仍为同步中奖',
         store.config.lotteryResult && store.config.lotteryResult.prizeName === '42矿石',
         JSON.stringify(store.config.lotteryResult));
+
+    // 场景 8：云端结果优先补写本地，并复用跨设备同步
+    syncStore = {};
+    store = { config: { lotteryResult: null, lotteryHistory: [], lastCheckInDate: null } };
+    const cloudToday = new Date().toISOString();
+    globalThis.__cloudPayload = {
+        version: 1,
+        latestCheckIn: { date: cloudToday, status: 'checked', contCount: 30, sumCount: 373 },
+        records: [{
+            date: cloudToday,
+            runId: 'test-run',
+            status: 'won',
+            prizeName: '云端66矿石',
+            message: '抽中 云端66矿石',
+            freeCount: 1
+        }]
+    };
+    const originalFetch = fetchImpl;
+    const cloudFetch = async (url) => {
+        if (String(url).includes('raw.githubusercontent.com')) {
+            return jsonResponse(globalThis.__cloudPayload);
+        }
+        return originalFetch(url);
+    };
+    out = await runInSandbox(
+        'fetch = __cloudFetch; __out.result = await syncCloudCheckInResult(true);',
+        { __cloudFetch: cloudFetch }
+    );
+    assert('云端结果能写入本地', out.result === true, JSON.stringify(out.result));
+    assert('云端中奖写入 lotteryResult', store.config.lotteryResult
+        && store.config.lotteryResult.prizeName === '云端66矿石',
+        JSON.stringify(store.config.lotteryResult));
+    assert('云端签到补写 lastCheckInDate', !!store.config.lastCheckInDate,
+        String(store.config.lastCheckInDate));
+    assert('云端结果同步到 chrome.storage.sync',
+        Object.values(syncStore).some(r => r && r.prizeName === '云端66矿石'),
+        JSON.stringify(syncStore));
+
+    // 场景 9：本地已有今日中奖时，云端 skipped 不覆盖
+    store = {
+        config: {
+            lotteryResult: { date: cloudToday, status: 'won', prizeName: '本地徽章' },
+            lotteryHistory: [],
+            lastCheckInDate: new Date().toDateString()
+        }
+    };
+    syncStore = {};
+    globalThis.__cloudPayload = {
+        version: 1,
+        latestCheckIn: { date: cloudToday, status: 'checked' },
+        records: [{ date: cloudToday, runId: 'test-run-2', status: 'skipped', message: '今日无免费抽奖机会' }]
+    };
+    await runInSandbox(
+        'fetch = __cloudFetch; __out.result = await syncCloudCheckInResult(true);',
+        { __cloudFetch: cloudFetch }
+    );
+    assert('云端 skipped 不覆盖本地中奖',
+        store.config.lotteryResult && store.config.lotteryResult.prizeName === '本地徽章',
+        JSON.stringify(store.config.lotteryResult));
+
+    // 场景 10：云端抽奖同步开启时，本机不再执行自动抽奖（避免双执行者竞态）
+    out = await runInSandbox(`
+        __out.enabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true });
+        __out.disabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: false });
+        __out.autoOff = shouldRunLocalLottery({ autoLottery: false, cloudLotterySync: false });
+    `);
+    assert('云端抽奖开启时本机不抽奖', out.enabled === false, String(out.enabled));
+    assert('关闭云端同步后本机可抽奖', out.disabled === true, String(out.disabled));
+    assert('自动抽奖关闭时本机不抽奖', out.autoOff === false, String(out.autoOff));
 
     // 汇总
     console.log('');

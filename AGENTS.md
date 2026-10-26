@@ -7,6 +7,7 @@
 - `npm test`：跑 `tests/simulate-checkin-timing.js`（约 6 秒，无第三方依赖），用 vm 沙箱 + 假 DOM/fetch 跑 `content.js`，7 个场景**并发**断言各自预算及「单场景最坏耗时 ≤ 8000ms」。改 `content.js` 等待/轮询逻辑后必须跑。
 - `npm run test:ab`：额外用 `git show HEAD:content.js` 的旧版做 A/B 对比，仅供观察，不影响退出码。
 - `npm run test:lottery`：约 1 秒。校验抽奖门禁（`free_count=0` 绝不调 draw）、奖品名取值、当天已有中奖不被 skipped 覆盖、跨设备同步中奖的展示优先级。改抽奖逻辑后必须跑。
+- `npm run test:cloud-lottery`：约 1 秒。校验云端抽奖同样遵守 `free_count=0` 绝不调 draw、draw 必须带 `?aid=2608`、配置异常不抽奖。改 `scripts/cloud-lottery.mjs` 后必须跑。
 - `npm run test:missed`：约 1 秒。校验过点未签巡查：过点且未签才补、已签/未到点/开关关闭不补、已有进行中签到让路、落库后清巡查闹钟。改巡查或 `updateCheckInHistory` 后必须跑。
 - `npm run test:date`：约 1 秒。校验抽奖日期归属只由 UTC+8 决定（子进程切换 TZ 覆盖 UTC-7 / UTC+8 / UTC+9 / UTC），含跨天/跨月/跨年边界。改 `shared/date.js` 或同步 key 后必须跑。
 - `npm run test:stats`：约 1 秒。校验连续天数（`cont_count`）与累计天数（`sum_count`）取自同一次 `get_counts`、无变化不写存储、失败/缺字段保留本地值。改统计同步逻辑后必须跑。
@@ -56,6 +57,7 @@
   - 本月：`GET growth_api/v1/get_by_month`（整月 `{date, status, point}`）。`status`: **3=已签到**、2=漏签、4=未来；**今天记录是独立 status（线上为 1）**，是否算已签要用 `get_today_status` 的 `check_in_done` 判定，不能只看 `status===3`。
   - **调用顺序**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则会被本地推算的 0 冲掉（见 `finalizeCheckInSuccess` / `syncCheckInStatusFromServer`）。popup 用 `monthCheckInMonth==='YYYY-MM'` 判断本月统计是否可用。
 - **签到成功后自动抽奖**：`finalizeCheckInSuccess` 先播报签到终态（通知 + 广播），再 `runLottery(tabId)`——查 `free_count`，>0 才抽，否则 `skipped`。**两个抽奖接口都必须 `world:'MAIN'`**：`lottery_config/get` 在 SW 里直接 fetch 只拿到空 body；`lottery/draw` 还必须带 **`?aid=2608`**，否则表现为 `Failed to fetch`。**`free_count=0` 时 draw 会改扣 200 矿石/次**，无免费次数绝不调 draw。抽奖全程 best-effort，不影响签到结果；`autoLottery:false` 可关闭。
+- **云端签到后免费抽奖**：`scripts/checkin.mjs` 签到后调用 `scripts/cloud-lottery.mjs`，同样先查 `free_count`，>0 才 draw，一次运行最多抽一次、失败不重试（避免响应丢失后重复消耗）。结果写入 `.cloud/checkin-lottery.json` 并提交回 `main`；扩展通过 raw.githubusercontent.com 拉取，合并进 `lotteryResult` / `lotteryHistory` 并复用 `chrome.storage.sync`。`cloudLotterySync` 默认开启，开启时本机不再自动抽奖，避免云端和扩展同时看到 `free_count=1` 后重复 draw。
 - **抽奖记录留存与同步**：本机流水存 `config.lotteryHistory`（最近 90 条，含 skipped/failed）。开启 `syncLottery` 时额外写 `chrome.storage.sync` 的 `lottery:YYYY-MM-DD`（按天一个 key，绕开单项 8KB 限制；未登录 Chrome 账号时退化为本地）。设置页用 `getLotteryLog` 取「本机 ∪ 同步」按天聚合（同一天优先 `won`），渲染成可翻月的抽奖日历。**签到日历无法跨月**——`get_by_month` 不接受月份参数，历史月份服务端不提供。
 - **抽奖日期归属统一按 UTC+8**：`shared/date.js` 的 `toLotteryDateKey()` 是唯一口径（平移到 UTC+8 后取 UTC 日期），不要用 `getFullYear()` / `getDate()`，否则跨时区设备会把同一记录归到不同天、sync key 对不上。background 里的 `toDateKey()` 只是薄封装。
 - **掘金没有个人抽奖记录接口**：`lottery_history/*` 走 `msToken`/`a_bogus` 签名，手动请求一律 `err_no:2 请求路由不存在`，所以网页手动抽的奖拿不到、也同步不了。

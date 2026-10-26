@@ -23,6 +23,7 @@ const FORM_FIELDS = [
     { key: 'checkInTime', el: 'checkInTime', type: 'value', fallback: v => v || DEFAULT_CONFIG.checkInTime },
     { key: 'autoLottery', el: 'autoLotteryToggle', type: 'checked', fallback: v => v !== false },
     { key: 'syncLottery', el: 'lotterySyncToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'cloudLotterySync', el: 'cloudLotterySyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'successNotification', el: 'successNotification', type: 'checked', fallback: v => v },
     { key: 'failureNotification', el: 'failureNotification', type: 'checked', fallback: v => v },
     { key: 'retryCount', el: 'retryCount', type: 'value', fallback: v => v },
@@ -48,6 +49,7 @@ const elements = {
     lotteryPrevMonth: null,
     lotteryNextMonth: null,
     lotterySyncToggle: null,
+    cloudLotterySyncToggle: null,
     saveBtn: null,
     resetBtn: null,
     clearHistoryBtn: null,
@@ -75,6 +77,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lotteryPrevMonth = document.getElementById('lotteryPrevMonth');
     elements.lotteryNextMonth = document.getElementById('lotteryNextMonth');
     elements.lotterySyncToggle = document.getElementById('lotterySyncToggle');
+    elements.cloudLotterySyncToggle = document.getElementById('cloudLotterySyncToggle');
     elements.saveBtn = document.getElementById('saveBtn');
     elements.resetBtn = document.getElementById('resetBtn');
     elements.clearHistoryBtn = document.getElementById('clearHistoryBtn');
@@ -296,6 +299,7 @@ async function saveConfig() {
             checkInTime: elements.checkInTime.value,
             autoLottery: elements.autoLotteryToggle.checked,
             syncLottery: elements.lotterySyncToggle.checked,
+            cloudLotterySync: elements.cloudLotterySyncToggle.checked,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,
             retryCount: parseInt(elements.retryCount.value),
