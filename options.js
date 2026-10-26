@@ -24,6 +24,7 @@ const FORM_FIELDS = [
     { key: 'autoLottery', el: 'autoLotteryToggle', type: 'checked', fallback: v => v !== false },
     { key: 'syncLottery', el: 'lotterySyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'cloudLotterySync', el: 'cloudLotterySyncToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'githubRepo', el: 'githubRepoInput', type: 'value', fallback: v => v || '' },
     { key: 'githubLotterySync', el: 'githubLotterySyncToggle', type: 'checked', fallback: v => v === true },
     { key: 'successNotification', el: 'successNotification', type: 'checked', fallback: v => v },
     { key: 'failureNotification', el: 'failureNotification', type: 'checked', fallback: v => v },
@@ -51,6 +52,7 @@ const elements = {
     lotteryNextMonth: null,
     lotterySyncToggle: null,
     cloudLotterySyncToggle: null,
+    githubRepoInput: null,
     githubLotterySyncToggle: null,
     githubTokenInput: null,
     saveBtn: null,
@@ -81,6 +83,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lotteryNextMonth = document.getElementById('lotteryNextMonth');
     elements.lotterySyncToggle = document.getElementById('lotterySyncToggle');
     elements.cloudLotterySyncToggle = document.getElementById('cloudLotterySyncToggle');
+    elements.githubRepoInput = document.getElementById('githubRepoInput');
     elements.githubLotterySyncToggle = document.getElementById('githubLotterySyncToggle');
     elements.githubTokenInput = document.getElementById('githubTokenInput');
     elements.saveBtn = document.getElementById('saveBtn');
@@ -309,6 +312,7 @@ async function saveConfig() {
             autoLottery: elements.autoLotteryToggle.checked,
             syncLottery: elements.lotterySyncToggle.checked,
             cloudLotterySync: elements.cloudLotterySyncToggle.checked,
+            githubRepo: elements.githubRepoInput.value.trim(),
             githubLotterySync: elements.githubLotterySyncToggle.checked,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,

@@ -22,9 +22,9 @@ const DEFAULT_CONFIG = {
     lotteryResult: null,        // 最近一次抽奖结果（供 popup 渲染）
     lotteryHistory: [],         // 抽奖历史记录（最近90条）
     syncLottery: true,          // 抽奖记录同步到其他设备（chrome.storage.sync）
-    cloudLotterySync: true,     // 拉取 GitHub Actions 的云端抽奖结果
+    cloudLotterySync: false,    // 拉取 GitHub Actions 的云端抽奖结果
     githubLotterySync: false,   // 本机抽中免费奖品后回传 GitHub
-    githubRepo: 'moonlitxy/juejin_qiandao' // 回传目标仓库（owner/repo）
+    githubRepo: ''              // 云端结果仓库（owner/repo），空表示不连接
 };
 
 /**

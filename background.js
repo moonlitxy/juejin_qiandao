@@ -12,8 +12,6 @@ importScripts('shared/date.js');
 const MISSED_CHECK_IN_ALARM = 'missedCheckInWatch';
 const MISSED_CHECK_IN_INTERVAL_MIN = 30;
 const PENDING_CHECK_IN_RETRY_MIN = 10;
-// 云端签到/抽奖结果文件（public 仓库，内容不含 Cookie）
-const CLOUD_RESULT_URL = 'https://raw.githubusercontent.com/moonlitxy/juejin_qiandao/main/.cloud/checkin-lottery.json';
 const CLOUD_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const CLOUD_RESULT_PATH = '.cloud/checkin-lottery.json';
 const CLOUD_RESULT_HISTORY_LIMIT = 90;
@@ -562,7 +560,14 @@ async function finalizeCheckInSuccess(result, config, tabId = null) {
 
 // 本机是否应该执行自动抽奖：云端同步开启时交给云端，避免双执行者竞态
 function shouldRunLocalLottery(config) {
-    return config?.autoLottery !== false && config?.cloudLotterySync === false;
+    if (config?.autoLottery === false) {
+        return false;
+    }
+    // 只有「已开启云端同步且仓库地址有效」时才让位给 Actions；
+    // 配了开关却漏填仓库时继续由本机抽奖，避免功能静默失效。
+    const cloudReady = config?.cloudLotterySync === true
+        && isValidGitHubRepo(config?.githubRepo);
+    return !cloudReady;
 }
 
 // 签到失败统一处理：通知、广播、关闭标签页，并返回结果
@@ -1357,12 +1362,12 @@ async function syncCloudCheckInResult(force = false) {
     try {
         const { config: storedConfig } = await chrome.storage.local.get(['config']);
         const config = { ...DEFAULT_CONFIG, ...(storedConfig || {}) };
-        if (config.cloudLotterySync === false) {
+        if (config.cloudLotterySync !== true || !isValidGitHubRepo(config.githubRepo)) {
             return false;
         }
 
         // 加时间戳绕过 raw.githubusercontent.com 的 CDN 缓存
-        const response = await fetch(`${CLOUD_RESULT_URL}?t=${Date.now()}`, { cache: 'no-store' });
+        const response = await fetch(getCloudResultUrl(config.githubRepo, Date.now()), { cache: 'no-store' });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -1476,6 +1481,16 @@ async function syncCloudCheckInResult(force = false) {
     }
 }
 
+/** 仓库名必须是 owner/repo，避免空配置拼出无效 URL */
+function isValidGitHubRepo(repo) {
+    return /^[^/\s]+\/[^/\s]+$/.test(repo || '');
+}
+
+/** 云端结果文件的公开读取地址 */
+function getCloudResultUrl(repo, timestamp) {
+    return `https://raw.githubusercontent.com/${repo}/main/${CLOUD_RESULT_PATH}?t=${timestamp}`;
+}
+
 /**
  * 把本机抽中的免费奖品合并进 GitHub 仓库的云端结果文件。
  *
@@ -1497,7 +1512,7 @@ async function syncLotteryResultToGitHub(record) {
         console.log('ℹ️ 未配置 GitHub Token，跳过本机抽奖回传');
         return false;
     }
-    if (!/^[^/\s]+\/[^/\s]+$/.test(config.githubRepo || '')) {
+    if (!isValidGitHubRepo(config.githubRepo)) {
         console.log('ℹ️ GitHub 仓库格式无效，跳过本机抽奖回传');
         return false;
     }

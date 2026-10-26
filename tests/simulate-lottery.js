@@ -262,7 +262,15 @@ async function main() {
 
     // 场景 8：云端结果优先补写本地，并复用跨设备同步
     syncStore = {};
-    store = { config: { lotteryResult: null, lotteryHistory: [], lastCheckInDate: null } };
+    store = {
+        config: {
+            lotteryResult: null,
+            lotteryHistory: [],
+            lastCheckInDate: null,
+            cloudLotterySync: true,
+            githubRepo: 'owner/repo'
+        }
+    };
     const cloudToday = new Date().toISOString();
     globalThis.__cloudPayload = {
         version: 1,
@@ -302,7 +310,9 @@ async function main() {
         config: {
             lotteryResult: { date: cloudToday, status: 'won', prizeName: '本地徽章' },
             lotteryHistory: [],
-            lastCheckInDate: new Date().toDateString()
+            lastCheckInDate: new Date().toDateString(),
+            cloudLotterySync: true,
+            githubRepo: 'owner/repo'
         }
     };
     syncStore = {};
@@ -322,11 +332,15 @@ async function main() {
     // 场景 10：云端抽奖同步开启时，本机不再执行自动抽奖（避免双执行者竞态）
     out = await runInSandbox(`
         __out.enabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true });
-        __out.disabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: false });
+        __out.disabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true, githubRepo: 'owner/repo' });
+        __out.noRepo = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true, githubRepo: '' });
+        __out.off = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: false });
         __out.autoOff = shouldRunLocalLottery({ autoLottery: false, cloudLotterySync: false });
     `);
-    assert('云端抽奖开启时本机不抽奖', out.enabled === false, String(out.enabled));
-    assert('关闭云端同步后本机可抽奖', out.disabled === true, String(out.disabled));
+    assert('云端开关开启但未填仓库时本机仍抽奖', out.enabled === true, String(out.enabled));
+    assert('云端抽奖配置完整时本机不抽奖', out.disabled === false, String(out.disabled));
+    assert('仓库为空时本机仍抽奖', out.noRepo === true, String(out.noRepo));
+    assert('关闭云端同步后本机可抽奖', out.off === true, String(out.off));
     assert('自动抽奖关闭时本机不抽奖', out.autoOff === false, String(out.autoOff));
 
     // 汇总
