@@ -1,13 +1,23 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-26T03:11:04.835Z",
+  "updatedAt": "2026-10-26T03:42:25.570Z",
   "latestCheckIn": {
-    "date": "2026-10-26T03:11:04.515Z",
+    "date": "2026-10-26T03:42:25.189Z",
     "status": "already_checked",
     "contCount": 30,
     "sumCount": 373
   },
   "records": [
+    {
+      "date": "2026-10-26T03:42:25.570Z",
+      "runId": "40265341693-1",
+      "status": "skipped",
+      "prizeName": null,
+      "prizeImage": null,
+      "lotteryType": null,
+      "message": "今日无免费抽奖机会",
+      "freeCount": 0
+    },
     {
       "date": "2026-10-26T03:11:04.835Z",
       "runId": "40262755148-1",
