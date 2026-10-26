@@ -16,6 +16,7 @@ const elements = {
     lastCheckInTime: null,
     manualCheckInBtn: null,
     openJuejinBtn: null,
+    manualLotteryBtn: null,
     autoCheckInToggle: null,
     checkInTime: null,
     optionsBtn: null
@@ -63,6 +64,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lastCheckInTime = document.getElementById('lastCheckInTime');
     elements.manualCheckInBtn = document.getElementById('manualCheckInBtn');
     elements.openJuejinBtn = document.getElementById('openJuejinBtn');
+    elements.manualLotteryBtn = document.getElementById('manualLotteryBtn');
     elements.autoCheckInToggle = document.getElementById('autoCheckInToggle');
     elements.checkInTime = document.getElementById('checkInTime');
     elements.optionsBtn = document.getElementById('optionsBtn');
@@ -103,7 +105,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 updateCheckInStatus(config);
             });
 
-            // 签到后抽奖会用掉免费次数，刷新抽奖行
+            // 签到后抽奖（含手动抽奖广播）会更新抽奖行
             refreshLotteryStatus();
 
             // 签到 / 抽奖可能改变矿石总数，刷新一次
@@ -122,6 +124,10 @@ function bindEventListeners() {
     // 打开掘金网站
     elements.openJuejinBtn.addEventListener('click', () => {
         chrome.tabs.create({ url: 'https://juejin.cn' });
+    });
+
+    elements.manualLotteryBtn.addEventListener('click', async () => {
+        await handleManualLottery();
     });
 
     // 自动签到开关
@@ -306,27 +312,35 @@ async function refreshLotteryStatus() {
     }
 }
 
-// 渲染抽奖结果行（只在当天抽中时显示；跳过/失败不占位，避免噪声）
+// 渲染抽奖结果行：中奖、无免费次数、失败都在当天显示
 function updateLotteryStatus(config) {
     const section = elements.lotterySection;
     const record = config && config.lotteryResult;
 
     // 「今天」按 UTC+8 判定（掘金结算时区），设备时区不影响
-    const isTodayWin = record
-        && record.status === 'won'
+    const isToday = record
+        && (record.status === 'won' || record.status === 'skipped' || record.status === 'failed')
         && toLotteryDateKey(record.date) === toLotteryDateKey(new Date());
 
-    if (!isTodayWin) {
+    if (!isToday) {
         section.hidden = true;
         return;
     }
 
     section.hidden = false;
     elements.lotteryIcon.className = 'lottery-icon';
-    elements.lotteryIcon.textContent = '🎁';
-    elements.lotteryText.textContent = record.prizeName
-        ? `抽中：${record.prizeName}`
-        : (record.message || '抽奖成功');
+    if (record.status === 'won') {
+        elements.lotteryIcon.textContent = '🎁';
+        elements.lotteryText.textContent = record.prizeName
+            ? `抽中：${record.prizeName}`
+            : (record.message || '抽奖成功');
+    } else if (record.status === 'skipped') {
+        elements.lotteryIcon.textContent = '🎟️';
+        elements.lotteryText.textContent = record.message || '今日无免费抽奖机会';
+    } else {
+        elements.lotteryIcon.textContent = '⚠️';
+        elements.lotteryText.textContent = record.message || '抽奖失败';
+    }
 }
 
 // 更新当前矿石总数（实时查询服务端，与掘金网站显示一致）
@@ -419,6 +433,30 @@ async function handleManualCheckIn() {
         elements.manualCheckInBtn.disabled = false;
         elements.manualCheckInBtn.innerHTML = '<span class="btn-icon">📝</span><span>立即签到</span>';
         showError(error.message || '签到过程出现错误');
+    }
+}
+
+// 插件内手动抽奖：同样先查免费次数，结果写入历史
+async function handleManualLottery() {
+    const button = elements.manualLotteryBtn;
+    try {
+        button.disabled = true;
+        button.innerHTML = '<span class="btn-icon">🎰</span><span>抽奖中...</span>';
+        const response = await sendMessage({ action: 'manualLottery' });
+        if (!response || response.success === false) {
+            showError((response && response.message) || '抽奖失败');
+        } else if (response.status === 'won') {
+            showSuccess(response.prizeName ? `抽中：${response.prizeName}` : '抽奖成功');
+        } else {
+            showSuccess(response.message || '今日无免费抽奖机会');
+        }
+        await refreshLotteryStatus();
+        updateCurrentPoint();
+    } catch (error) {
+        showError(error.message || '抽奖过程出现错误');
+    } finally {
+        button.disabled = false;
+        button.innerHTML = '<span class="btn-icon">🎰</span><span>立即抽奖</span>';
     }
 }
 

@@ -549,7 +549,8 @@ async function finalizeCheckInSuccess(result, config, tabId = null) {
         }
 
         // 抽到奖品或抽奖失败时补一次广播，让已打开的 popup 刷新抽奖行
-        if (lottery.status === 'won' || lottery.status === 'failed') {
+        // skipped 也要广播：popup 与设置页需要立即显示“无免费次数”
+        if (lottery.status === 'won' || lottery.status === 'failed' || lottery.status === 'skipped') {
             broadcastCheckInResult({ ...result, success: true, message, lottery });
         }
     }
@@ -566,6 +567,7 @@ function shouldRunLocalLottery(config) {
     // 只有「已开启云端同步且仓库地址有效」时才让位给 Actions；
     // 配了开关却漏填仓库时继续由本机抽奖，避免功能静默失效。
     const cloudReady = config?.cloudLotterySync === true
+        && config?.cloudRepoConfirmed === true
         && isValidGitHubRepo(config?.githubRepo);
     return !cloudReady;
 }
@@ -1199,6 +1201,56 @@ async function runLottery(tabId) {
     }
 }
 
+/**
+ * 插件内手动抽奖：独立于签到，仍然先查免费次数。
+ * 结果写入本地流水（含 skipped），中奖时按开关回传 GitHub。
+ */
+async function runManualLottery() {
+    let tabId = null;
+    let openedTab = false;
+    try {
+        const tabs = await chrome.tabs.query({ url: ['https://juejin.cn/*', 'https://*.juejin.cn/*'] });
+        const reusable = tabs.find(tab => tab.id && tab.url && isCheckInPageUrl(tab.url));
+        if (reusable) {
+            tabId = reusable.id;
+        } else {
+            const tab = await chrome.tabs.create({ url: 'https://juejin.cn/pins', active: false });
+            tabId = tab.id;
+            openedTab = true;
+            await waitForTabLoaded(tabId, 30000);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+
+        const lottery = await runLottery(tabId);
+        const saved = await saveLotteryResult(lottery);
+        if (saved && lottery.status === 'won') {
+            await syncLotteryResultToGitHub(saved).catch(() => {});
+        }
+
+        const result = {
+            success: lottery.status !== 'failed',
+            status: lottery.status,
+            prizeName: lottery.prizeName || null,
+            message: lottery.message,
+            lottery
+        };
+        // 复用签到完成广播，popup 会同时刷新签到状态、抽奖行和矿石数；
+        // 单独发 lotteryCompleted 会漏掉已经打开的设置页。
+        broadcastCheckInResult({
+            success: result.success,
+            message: result.message,
+            lottery
+        });
+        return result;
+    } catch (error) {
+        return { success: false, status: 'failed', message: `抽奖出错：${error.message}` };
+    } finally {
+        if (openedTab && typeof tabId === 'number') {
+            closeTabQuietly(tabId);
+        }
+    }
+}
+
 // 把 ISO 时间串转成本地日期 key（YYYY-MM-DD），用于按天同步
 // 抽奖归属日：按 UTC+8 计算（见 shared/date.js）。
 // 保留这个薄封装，调用方不必关心具体时区实现。
@@ -1362,7 +1414,9 @@ async function syncCloudCheckInResult(force = false) {
     try {
         const { config: storedConfig } = await chrome.storage.local.get(['config']);
         const config = { ...DEFAULT_CONFIG, ...(storedConfig || {}) };
-        if (config.cloudLotterySync !== true || !isValidGitHubRepo(config.githubRepo)) {
+        if (config.cloudLotterySync !== true
+            || config.cloudRepoConfirmed !== true
+            || !isValidGitHubRepo(config.githubRepo)) {
             return false;
         }
 
@@ -1395,35 +1449,32 @@ async function syncCloudCheckInResult(force = false) {
             return changed;
         }
 
+        // 无免费次数也是当天结果：写入本地流水，设置页抽奖日历才能看到 skipped。
+        // 同一天已经中奖时保留中奖展示，但流水仍记录这次 skipped。
+        const history = [...(merged.lotteryHistory || [])];
+        for (const record of todayRecords) {
+            const exists = history.some(item =>
+                item && item.date === record.date && item.status === record.status
+                && (item.prizeName || null) === (record.prizeName || null));
+            if (!exists) {
+                history.push({
+                    date: record.date,
+                    status: record.status,
+                    prizeName: record.prizeName || null,
+                    prizeImage: record.prizeImage || null,
+                    lotteryType: record.lotteryType ?? null,
+                    message: record.message || '',
+                    freeCount: record.freeCount ?? null,
+                    source: record.source || 'cloud'
+                });
+            }
+        }
+        merged.lotteryHistory = history
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, 90);
+
         // 同一天优先中奖；否则取最新一条（失败/跳过也可用于诊断）
         const cloudRecord = todayRecords.find(record => record.status === 'won') || todayRecords[0];
-
-        // 云端和本机都可能在同一天抽中，合并后的流水要保留全部中奖记录，
-        // 不能只留下 popup 展示用的那一条，否则 GitHub 文件回拉后会丢本地奖品
-        const winningRecords = todayRecords.filter(record => record.status === 'won');
-        if (winningRecords.length > 0) {
-            const history = [...(merged.lotteryHistory || [])];
-            for (const record of winningRecords) {
-                const exists = history.some(item =>
-                    item && item.date === record.date && item.status === 'won'
-                    && item.prizeName === (record.prizeName || null));
-                if (!exists) {
-                    history.push({
-                        date: record.date,
-                        status: 'won',
-                        prizeName: record.prizeName || null,
-                        prizeImage: record.prizeImage || null,
-                        lotteryType: record.lotteryType ?? null,
-                        message: record.message || '',
-                        freeCount: record.freeCount ?? null,
-                        source: record.source || 'cloud'
-                    });
-                }
-            }
-            merged.lotteryHistory = history
-                .sort((a, b) => new Date(b.date) - new Date(a.date))
-                .slice(0, 90);
-        }
 
         // 本地已有今日中奖时保留本地；否则以云端结果为准
         const localTodayWin = merged.lotteryResult
@@ -1454,12 +1505,6 @@ async function syncCloudCheckInResult(force = false) {
         }
 
         merged.lotteryResult = normalized;
-        // 云端记录也进入本机流水，设置页的抽奖日历才能看到
-        const alreadyInHistory = (merged.lotteryHistory || []).some(record =>
-            record && record.date === normalized.date && record.status === normalized.status);
-        if (!alreadyInHistory) {
-            merged.lotteryHistory = [normalized, ...(merged.lotteryHistory || [])].slice(0, 90);
-        }
 
         await chrome.storage.local.set({ config: merged });
         changed = true;
@@ -1792,6 +1837,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ success: false, message: error.message });
         });
         return true; // 保持消息通道开启
+    }
+
+    if (request.action === 'manualLottery') {
+        // 插件内手动抽奖：优先使用当前掘金标签页；没有可用标签页时临时开一个，
+        // 抽完关闭。仍然先查 free_count，>0 才 draw。
+        runManualLottery().then(result => {
+            sendResponse(result);
+        }).catch(error => {
+            sendResponse({ success: false, status: 'failed', message: error.message });
+        });
+        return true;
     }
 
     if (request.action === 'syncCheckInStatus') {

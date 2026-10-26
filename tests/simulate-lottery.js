@@ -268,7 +268,8 @@ async function main() {
             lotteryHistory: [],
             lastCheckInDate: null,
             cloudLotterySync: true,
-            githubRepo: 'owner/repo'
+            githubRepo: 'owner/repo',
+            cloudRepoConfirmed: true
         }
     };
     const cloudToday = new Date().toISOString();
@@ -312,7 +313,8 @@ async function main() {
             lotteryHistory: [],
             lastCheckInDate: new Date().toDateString(),
             cloudLotterySync: true,
-            githubRepo: 'owner/repo'
+            githubRepo: 'owner/repo',
+            cloudRepoConfirmed: true
         }
     };
     syncStore = {};
@@ -332,7 +334,12 @@ async function main() {
     // 场景 10：云端抽奖同步开启时，本机不再执行自动抽奖（避免双执行者竞态）
     out = await runInSandbox(`
         __out.enabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true });
-        __out.disabled = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true, githubRepo: 'owner/repo' });
+        __out.disabled = shouldRunLocalLottery({
+            autoLottery: true,
+            cloudLotterySync: true,
+            githubRepo: 'owner/repo',
+            cloudRepoConfirmed: true
+        });
         __out.noRepo = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: true, githubRepo: '' });
         __out.off = shouldRunLocalLottery({ autoLottery: true, cloudLotterySync: false });
         __out.autoOff = shouldRunLocalLottery({ autoLottery: false, cloudLotterySync: false });
@@ -342,6 +349,41 @@ async function main() {
     assert('仓库为空时本机仍抽奖', out.noRepo === true, String(out.noRepo));
     assert('关闭云端同步后本机可抽奖', out.off === true, String(out.off));
     assert('自动抽奖关闭时本机不抽奖', out.autoOff === false, String(out.autoOff));
+
+    // 场景 11：云端 skipped 也要进入本地抽奖历史（设置页才能显示“未抽奖”）
+    syncStore = {};
+    store = {
+        config: {
+            lotteryResult: null,
+            lotteryHistory: [],
+            lastCheckInDate: new Date().toDateString(),
+            cloudLotterySync: true,
+            githubRepo: 'owner/repo',
+            cloudRepoConfirmed: true
+        }
+    };
+    globalThis.__cloudPayload = {
+        version: 1,
+        latestCheckIn: { date: cloudToday, status: 'checked' },
+        records: [{
+            date: cloudToday,
+            runId: 'test-run-skipped',
+            status: 'skipped',
+            prizeName: null,
+            message: '今日无免费抽奖机会',
+            freeCount: 0
+        }]
+    };
+    await runInSandbox(
+        'fetch = __cloudFetch; __out.result = await syncCloudCheckInResult(true);',
+        { __cloudFetch: cloudFetch }
+    );
+    assert('云端 skipped 写入抽奖历史',
+        store.config.lotteryHistory.some(item => item.status === 'skipped'),
+        JSON.stringify(store.config.lotteryHistory));
+    assert('云端 skipped 作为今日结果展示',
+        store.config.lotteryResult && store.config.lotteryResult.status === 'skipped',
+        JSON.stringify(store.config.lotteryResult));
 
     // 汇总
     console.log('');

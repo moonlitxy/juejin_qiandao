@@ -191,7 +191,7 @@
                     <div class="setting-item">
                         <div class="setting-info">
                             <h3 class="setting-label">云端结果仓库</h3>
-                            <p class="setting-desc">填写你自己的 GitHub 仓库（owner/repo），例如 your-name/juejin_qiandao</p>
+                            <p class="setting-desc">填写你自己的 GitHub 仓库（owner/repo）；留空则只用本机，不请求云端</p>
                         </div>
                         <input type="text" id="githubRepoInput" class="token-input"
                                placeholder="owner/repo" autocomplete="off">
@@ -236,6 +236,7 @@
                 </div>
 
                 <div class="lottery-actions">
+                    <button type="button" class="btn-text" id="manualLotteryBtn">立即抽奖</button>
                     <button type="button" class="btn-text" id="clearLotteryBtn">清空抽奖记录</button>
                 </div>
             </section>

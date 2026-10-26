@@ -9,14 +9,31 @@ const PATH_LOTTERY_CONFIG = '/growth_api/v1/lottery_config/get';
 // ?aid=2608 是掘金 Web 端固定 app id，缺少时会表现为 Failed to fetch
 const PATH_LOTTERY_DRAW = '/growth_api/v1/lottery/draw?aid=2608';
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /** 查询免费抽奖次数：data.free_count 为主，其余字段为兼容兜底 */
 const getLotteryConfig = async (path) => {
-    const r = await fetch(`https://api.juejin.cn${path}`, { credentials: 'include' });
-    const text = await r.text();
-    if (!text) {
-        return { httpStatus: r.status, empty: true };
+    let lastError = null;
+    // 只读接口可以安全重试；超时/空响应时最多再试 2 次
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const r = await fetch(`https://api.juejin.cn${path}`, { credentials: 'include' });
+            const text = await r.text();
+            if (!text) {
+                lastError = new Error('空响应');
+            } else {
+                return { httpStatus: r.status, ...JSON.parse(text) };
+            }
+        } catch (error) {
+            lastError = error;
+        }
+        if (attempt < 2) {
+            await sleep(2000);
+        }
     }
-    return { httpStatus: r.status, ...JSON.parse(text) };
+    return { empty: true, error: lastError?.message || '空响应' };
 };
 
 /** 执行抽奖：err_no 0=成功，400=免费次数已用完 */

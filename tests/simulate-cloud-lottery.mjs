@@ -6,7 +6,7 @@
 
 'use strict';
 
-import { runLottery } from '../scripts/cloud-lottery.mjs';
+import { runLottery, getLotteryConfig } from '../scripts/cloud-lottery.mjs';
 
 const results = [];
 function assert(name, cond, detail) {
@@ -90,6 +90,35 @@ async function main() {
     );
     result = await runLottery(session);
     assert('err_no=400 归为 skipped', result.status === 'skipped', JSON.stringify(result));
+
+    // 场景 6：只读配置接口第一次超时，内部重试后成功
+    const originalFetch = globalThis.fetch;
+    const originalSetTimeout = globalThis.setTimeout;
+    let fetchCalls = 0;
+    globalThis.setTimeout = (fn) => { fn(); return 0; };
+    globalThis.fetch = async () => {
+        fetchCalls++;
+        if (fetchCalls === 1) {
+            throw new Error('Timeout 30000ms exceeded');
+        }
+        return response({ err_no: 0, data: { free_count: 1 } });
+    };
+    let cfg = await getLotteryConfig('/growth_api/v1/lottery_config/get');
+    assert('配置超时后自动重试成功', cfg.err_no === 0 && cfg.data.free_count === 1,
+        JSON.stringify(cfg));
+    assert('只读配置接口共请求 2 次', fetchCalls === 2, String(fetchCalls));
+
+    // 场景 7：连续空响应 3 次后返回失败，不会继续 draw
+    fetchCalls = 0;
+    globalThis.fetch = async () => {
+        fetchCalls++;
+        return { ok: true, status: 200, text: async () => '' };
+    };
+    cfg = await getLotteryConfig('/growth_api/v1/lottery_config/get');
+    assert('空响应最多尝试 3 次', fetchCalls === 3, String(fetchCalls));
+    assert('空响应返回 empty 标记', cfg.empty === true, JSON.stringify(cfg));
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
 
     console.log('');
     const failures = results.filter((item) => !item.pass);

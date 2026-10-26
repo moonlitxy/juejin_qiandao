@@ -59,6 +59,7 @@ const elements = {
     resetBtn: null,
     clearHistoryBtn: null,
     clearLotteryBtn: null,
+    manualLotteryBtn: null,
     resetTodayBtn: null
 };
 
@@ -90,6 +91,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.resetBtn = document.getElementById('resetBtn');
     elements.clearHistoryBtn = document.getElementById('clearHistoryBtn');
     elements.clearLotteryBtn = document.getElementById('clearLotteryBtn');
+    elements.manualLotteryBtn = document.getElementById('manualLotteryBtn');
     elements.resetTodayBtn = document.getElementById('resetTodayBtn');
 
     // 绑定事件
@@ -118,6 +120,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 loadCalendar();
                 loadHistory();
+            }
+            // 手动/自动抽奖都会走这条广播；skipped 也要刷新日历
+            if (request.result && request.result.lottery) {
+                loadLotteryLog();
             }
         }
     });
@@ -170,6 +176,11 @@ function bindEventListeners() {
         if (confirm('确定要清空所有抽奖记录吗？已同步的记录也会一并清除。')) {
             await clearLotteryLog();
         }
+    });
+
+    // 插件内手动抽奖：结果会进入抽奖日历（含无免费次数）
+    elements.manualLotteryBtn.addEventListener('click', async () => {
+        await handleManualLottery();
     });
 
     // 抽奖日历翻月
@@ -245,6 +256,32 @@ function finishManualCheckIn(result) {
     showPageNotification(result.message || '签到成功', 'success');
     loadCalendar();
     loadHistory();
+    loadLotteryLog();
+}
+
+// 插件内手动抽奖：按钮忙碌态 + 结果通知 + 刷新日历
+async function handleManualLottery() {
+    const button = elements.manualLotteryBtn;
+    try {
+        button.disabled = true;
+        button.textContent = '抽奖中...';
+        const result = await sendMessage({ action: 'manualLottery' });
+        if (!result || result.success === false) {
+            showPageNotification((result && result.message) || '抽奖失败', 'error');
+        } else if (result.status === 'won') {
+            showPageNotification(result.prizeName ? `抽中：${result.prizeName}` : '抽奖成功', 'success');
+        } else {
+            showPageNotification(result.message || '今日无免费抽奖机会', 'info');
+        }
+        // 无论中奖、无免费次数还是失败，都重新拉一次记录，
+        // 让日历立即显示这次结果（skipped 也要可见）
+        await loadLotteryLog();
+    } catch (error) {
+        showPageNotification(error.message || '抽奖过程出现错误', 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = '立即抽奖';
+    }
 }
 
 // 加载配置
@@ -313,6 +350,7 @@ async function saveConfig() {
             syncLottery: elements.lotterySyncToggle.checked,
             cloudLotterySync: elements.cloudLotterySyncToggle.checked,
             githubRepo: elements.githubRepoInput.value.trim(),
+            cloudRepoConfirmed: !!elements.githubRepoInput.value.trim(),
             githubLotterySync: elements.githubLotterySyncToggle.checked,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,
