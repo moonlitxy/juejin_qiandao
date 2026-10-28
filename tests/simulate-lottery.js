@@ -155,6 +155,11 @@ function createContext() {
         setTimeout,
         clearTimeout,
         fetch: fetchImpl,
+        btoa: (text) => Buffer.from(text, 'binary').toString('base64'),
+        atob: (text) => Buffer.from(text, 'base64').toString('binary'),
+        TextEncoder,
+        TextDecoder,
+        Uint8Array,
         chrome: chromeMock,
         importScripts() {}, // config.js 已拼接，无需真实加载
         __out: {},
@@ -384,6 +389,81 @@ async function main() {
     assert('云端 skipped 作为今日结果展示',
         store.config.lotteryResult && store.config.lotteryResult.status === 'skipped',
         JSON.stringify(store.config.lotteryResult));
+
+    // 场景 12：云端今天没有记录、本机签到了也抽过 → 同步时把本机结果补传 GitHub
+    const putCalls = [];
+    const cloudWithPut = async (url, options = {}) => {
+        if (String(url).includes('api.github.com') && options.method === 'PUT') {
+            putCalls.push(JSON.parse(options.body));
+            return jsonResponse({ content: {} });
+        }
+        return cloudFetch(url, options);
+    };
+    store = {
+        config: {
+            lotteryResult: { date: cloudToday, status: 'won', prizeName: '本机徽章' },
+            lotteryHistory: [{ date: cloudToday, status: 'won', prizeName: '本机徽章', message: '抽中 本机徽章' }],
+            lastCheckInDate: new Date().toDateString(),
+            cloudLotterySync: true,
+            cloudRepoConfirmed: true,
+            githubRepo: 'owner/repo',
+            githubLotterySync: true
+        },
+        githubLotteryToken: 'github_pat_test'
+    };
+    syncStore = {};
+    globalThis.__cloudPayload = {
+        version: 1,
+        latestCheckIn: { date: cloudToday, status: 'checked' },
+        records: []
+    };
+    await runInSandbox(
+        'fetch = __cloudFetch; __out.result = await syncCloudCheckInResult(true);',
+        { __cloudFetch: cloudWithPut }
+    );
+    assert('云端无今日记录时本机中奖补传 GitHub', putCalls.length === 1,
+        `putCalls=${putCalls.length}`);
+    const pushed = putCalls.length ? JSON.parse(Buffer.from(putCalls[0].content, 'base64').toString('utf8')) : null;
+    assert('补传内容只含抽奖元数据、不含 Token',
+        pushed && pushed.records.some(r => r.prizeName === '本机徽章')
+        && !JSON.stringify(pushed).includes('github_pat_'),
+        JSON.stringify(pushed));
+    assert('本机中奖仍保留在 lotteryResult',
+        store.config.lotteryResult && store.config.lotteryResult.prizeName === '本机徽章',
+        JSON.stringify(store.config.lotteryResult));
+
+    // 场景 13：本机未开回传 / 今日没签到 → 不补传
+    for (const [label, overrides, lastCheckIn] of [
+        ['未开本机回传开关时不补传', { githubLotterySync: false }, new Date().toDateString()],
+        ['今日未签到时本机抽奖不补传', { githubLotterySync: true }, null],
+    ]) {
+        const calls = [];
+        const cloudSpy = async (url, options = {}) => {
+            if (String(url).includes('api.github.com') && options.method === 'PUT') {
+                calls.push(options);
+                return jsonResponse({ content: {} });
+            }
+            return cloudFetch(url, options);
+        };
+        store = {
+            config: {
+                lotteryResult: { date: cloudToday, status: 'won', prizeName: '本机徽章' },
+                lotteryHistory: [{ date: cloudToday, status: 'won', prizeName: '本机徽章' }],
+                lastCheckInDate: lastCheckIn,
+                cloudLotterySync: true,
+                cloudRepoConfirmed: true,
+                githubRepo: 'owner/repo',
+                ...overrides
+            },
+            githubLotteryToken: 'github_pat_test'
+        };
+        globalThis.__cloudPayload = { version: 1, latestCheckIn: null, records: [] };
+        await runInSandbox(
+            'fetch = __cloudFetch; __out.result = await syncCloudCheckInResult(true);',
+            { __cloudFetch: cloudSpy }
+        );
+        assert(label, calls.length === 0, `putCalls=${calls.length}`);
+    }
 
     // 汇总
     console.log('');

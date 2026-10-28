@@ -178,6 +178,7 @@ body {
 .action-section {
     padding: 0 20px 20px;
     display: flex;
+    flex-direction: column;
     gap: 12px;
 }
 
@@ -226,6 +227,22 @@ body {
 
 .btn-icon {
     font-size: 16px;
+}
+
+/* 主操作按钮独占一行，次要操作并排两列 */
+.action-btn-main {
+    width: 100%;
+}
+
+.action-buttons-row {
+    display: flex;
+    gap: 12px;
+    width: 100%;
+}
+
+.action-buttons-row .btn {
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 /* 设置区域 */

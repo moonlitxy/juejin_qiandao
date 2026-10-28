@@ -158,9 +158,16 @@ async function main() {
         freeCount: 1,
     };
 
+    // 回传要求用户已确认云端仓库（cloudRepoConfirmed），仓库格式有效
+    const syncConfig = {
+        githubLotterySync: true,
+        githubRepo: 'moonlitxy/juejin_qiandao',
+        cloudRepoConfirmed: true,
+    };
+
     // 场景 1：开关关闭，不访问 GitHub
     store = {
-        config: { githubLotterySync: false, githubRepo: 'moonlitxy/juejin_qiandao' },
+        config: { ...syncConfig, githubLotterySync: false },
         githubLotteryToken: 'github_pat_test',
     };
     requests = [];
@@ -169,15 +176,24 @@ async function main() {
 
     // 场景 2：未配置 Token，不访问 GitHub
     store = {
-        config: { githubLotterySync: true, githubRepo: 'moonlitxy/juejin_qiandao' },
+        config: { ...syncConfig },
     };
     requests = [];
     await runInSandbox(`await syncLotteryResultToGitHub(${JSON.stringify(record)});`);
     assert('未配置 Token 时不发请求', requests.length === 0, JSON.stringify(requests));
 
+    // 场景 2b：仓库未在设置页确认时不访问 GitHub（防止走别人的仓库）
+    store = {
+        config: { ...syncConfig, cloudRepoConfirmed: false },
+        githubLotteryToken: 'github_pat_test',
+    };
+    requests = [];
+    await runInSandbox(`await syncLotteryResultToGitHub(${JSON.stringify(record)});`);
+    assert('仓库未确认时不发请求', requests.length === 0, JSON.stringify(requests));
+
     // 场景 3：合并中奖记录并保留云端已有记录
     store = {
-        config: { githubLotterySync: true, githubRepo: 'moonlitxy/juejin_qiandao' },
+        config: { ...syncConfig },
         githubLotteryToken: 'github_pat_test',
     };
     requests = [];
@@ -220,7 +236,7 @@ async function main() {
 
     // 场景 5：SHA 冲突后重新读取并重试成功
     store = {
-        config: { githubLotterySync: true, githubRepo: 'moonlitxy/juejin_qiandao' },
+        config: { ...syncConfig },
         githubLotteryToken: 'github_pat_test',
     };
     requests = [];
@@ -236,6 +252,41 @@ async function main() {
     const secondPut = JSON.parse(requests[3].options.body);
     assert('冲突后重试成功', out.result === true, String(out.result));
     assert('重试使用最新 SHA', secondPut.sha === 'new-sha', String(secondPut.sha));
+
+    // 场景 6：调用方已拿到云端记录时跳过读取，直接写入
+    store = {
+        config: { ...syncConfig },
+        githubLotteryToken: 'github_pat_test',
+    };
+    requests = [];
+    getResponses = [];
+    putResponses = [response(200, { content: {} })];
+    out = await runInSandbox(
+        `__out.result = await syncLotteryResultToGitHub(${JSON.stringify(record)}, []);`);
+    assert('传入已知记录时不重复读取', out.result === true && requests.length === 1,
+        `result=${out.result}, requests=${requests.length}`);
+    assert('已知记录入参时仍使用 Bearer Token',
+        requests[0].options.headers.Authorization === 'Bearer github_pat_test',
+        JSON.stringify(requests[0].options.headers));
+
+    // 场景 7：云端文件里今天已有中奖时，本机 skipped 不写入（不覆盖奖品）
+    store = {
+        config: { ...syncConfig },
+        githubLotteryToken: 'github_pat_test',
+    };
+    requests = [];
+    getResponses = [];
+    putResponses = [];
+    const skipped = {
+        date: new Date().toISOString(),
+        status: 'skipped',
+        prizeName: null,
+        message: '今日无免费抽奖机会',
+    };
+    out = await runInSandbox(
+        `__out.result = await syncLotteryResultToGitHub(${JSON.stringify(skipped)}, ${JSON.stringify([record])});`);
+    assert('云端已中奖时不写入本机 skipped', out.result === false && requests.length === 0,
+        `result=${out.result}, requests=${requests.length}`);
 
     console.log('');
     const failures = results.filter((item) => !item.pass);

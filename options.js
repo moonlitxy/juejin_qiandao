@@ -12,6 +12,11 @@ let manualCheckInTimeoutId = null;
 // 等待广播的超时兜底（毫秒），避免永远卡在"签到中..."
 const MANUAL_CHECKIN_TIMEOUT = 90000;
 
+// 手动抽奖等待状态：background 立即 ack，最终结果由 checkInCompleted 广播送达
+let manualLotteryWaiting = false;
+let manualLotteryTimeoutId = null;
+const MANUAL_LOTTERY_TIMEOUT = 90000;
+
 // 抽奖日历：全量记录缓存 + 当前查看的年月（0 表示尚未初始化，用当前月）
 let lotteryLogCache = [];
 let lotteryView = { year: 0, month: 0 };
@@ -120,6 +125,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 loadCalendar();
                 loadHistory();
+            }
+            if (manualLotteryWaiting && request.result && request.result.source === 'manualLottery') {
+                finishManualLottery(request.result.lottery);
+                return;
             }
             // 手动/自动抽奖都会走这条广播；skipped 也要刷新日历
             if (request.result && request.result.lottery) {
@@ -261,27 +270,59 @@ function finishManualCheckIn(result) {
 
 // 插件内手动抽奖：按钮忙碌态 + 结果通知 + 刷新日历
 async function handleManualLottery() {
-    const button = elements.manualLotteryBtn;
+    setManualLotteryButtonBusy(true);
+    manualLotteryWaiting = true;
+    clearTimeout(manualLotteryTimeoutId);
+    manualLotteryTimeoutId = setTimeout(() => {
+        resetManualLotteryWaiting();
+        setManualLotteryButtonBusy(false);
+        showPageNotification('抽奖结果未确认，请稍后刷新', 'info');
+    }, MANUAL_LOTTERY_TIMEOUT);
+
     try {
-        button.disabled = true;
-        button.textContent = '抽奖中...';
         const result = await sendMessage({ action: 'manualLottery' });
-        if (!result || result.success === false) {
-            showPageNotification((result && result.message) || '抽奖失败', 'error');
-        } else if (result.status === 'won') {
-            showPageNotification(result.prizeName ? `抽中：${result.prizeName}` : '抽奖成功', 'success');
-        } else {
-            showPageNotification(result.message || '今日无免费抽奖机会', 'info');
+
+        // 新协议下 background 会立即返回 pending，最终结果走广播。
+        if (result && result.pending) {
+            return;
         }
-        // 无论中奖、无免费次数还是失败，都重新拉一次记录，
-        // 让日历立即显示这次结果（skipped 也要可见）
-        await loadLotteryLog();
+
+        // 兼容旧 background 直接返回最终结果的路径。
+        finishManualLottery(result);
     } catch (error) {
+        resetManualLotteryWaiting();
+        setManualLotteryButtonBusy(false);
         showPageNotification(error.message || '抽奖过程出现错误', 'error');
-    } finally {
-        button.disabled = false;
-        button.textContent = '立即抽奖';
     }
+}
+
+function setManualLotteryButtonBusy(busy) {
+    elements.manualLotteryBtn.disabled = busy;
+    elements.manualLotteryBtn.textContent = busy ? '抽奖中...' : '立即抽奖';
+}
+
+function resetManualLotteryWaiting() {
+    manualLotteryWaiting = false;
+    if (manualLotteryTimeoutId) {
+        clearTimeout(manualLotteryTimeoutId);
+        manualLotteryTimeoutId = null;
+    }
+}
+
+async function finishManualLottery(result) {
+    resetManualLotteryWaiting();
+    setManualLotteryButtonBusy(false);
+
+    const lottery = result && result.lottery ? result.lottery : result;
+    if (!result || result.success === false || !lottery || lottery.status === 'failed') {
+        showPageNotification((lottery && lottery.message) || (result && result.message) || '抽奖失败', 'error');
+    } else if (lottery.status === 'won') {
+        showPageNotification(lottery.prizeName ? `抽中：${lottery.prizeName}` : '抽奖成功', 'success');
+    } else {
+        showPageNotification(lottery.message || '今日无免费抽奖机会', 'info');
+    }
+
+    await loadLotteryLog();
 }
 
 // 加载配置

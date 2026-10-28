@@ -31,6 +31,11 @@ let manualCheckInTimeoutId = null;
 // 超时后恢复按钮，避免永远卡在"签到中..."
 const MANUAL_CHECKIN_TIMEOUT = 90000;
 
+// 手动抽奖等待状态：background 立即 ack，结果由 checkInCompleted 广播送达
+let manualLotteryWaiting = false;
+let manualLotteryTimeoutId = null;
+const MANUAL_LOTTERY_TIMEOUT = 90000;
+
 // 签到时间输入的保存防抖（毫秒）：input 事件每次改值都会触发，合并后再提交
 const TIME_SAVE_DEBOUNCE = 400;
 let timeSaveTimerId = null;
@@ -100,6 +105,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 finishManualCheckIn(request.result);
             }
 
+            if (manualLotteryWaiting && request.result && request.result.source === 'manualLottery') {
+                finishManualLottery(request.result.lottery);
+                return;
+            }
+
             // 再统一刷新状态区与统计
             loadConfig().then(config => {
                 updateCheckInStatus(config);
@@ -123,7 +133,7 @@ function bindEventListeners() {
 
     // 打开掘金网站
     elements.openJuejinBtn.addEventListener('click', () => {
-        chrome.tabs.create({ url: 'https://juejin.cn' });
+        chrome.tabs.create({ url: 'https://juejin.cn/pins/new' });
     });
 
     elements.manualLotteryBtn.addEventListener('click', async () => {
@@ -344,7 +354,6 @@ function updateLotteryStatus(config) {
 }
 
 // 更新当前矿石总数（实时查询服务端，与掘金网站显示一致）
-// 签到 / 抽奖后服务端点数已更新，再查即为最新
 async function updateCurrentPoint() {
     try {
         const response = await sendMessage({ action: 'getCurrentPoint' });
@@ -438,26 +447,62 @@ async function handleManualCheckIn() {
 
 // 插件内手动抽奖：同样先查免费次数，结果写入历史
 async function handleManualLottery() {
-    const button = elements.manualLotteryBtn;
+    setManualLotteryButtonBusy(true);
+    manualLotteryWaiting = true;
+    clearTimeout(manualLotteryTimeoutId);
+    manualLotteryTimeoutId = setTimeout(() => {
+        resetManualLotteryWaiting();
+        setManualLotteryButtonBusy(false);
+        showError('抽奖结果未确认，请稍后刷新');
+    }, MANUAL_LOTTERY_TIMEOUT);
+
     try {
-        button.disabled = true;
-        button.innerHTML = '<span class="btn-icon">🎰</span><span>抽奖中...</span>';
         const response = await sendMessage({ action: 'manualLottery' });
-        if (!response || response.success === false) {
-            showError((response && response.message) || '抽奖失败');
-        } else if (response.status === 'won') {
-            showSuccess(response.prizeName ? `抽中：${response.prizeName}` : '抽奖成功');
-        } else {
-            showSuccess(response.message || '今日无免费抽奖机会');
+
+        // 新协议下 background 会立即返回 pending，最终结果走广播。
+        if (response && response.pending) {
+            return;
         }
-        await refreshLotteryStatus();
-        updateCurrentPoint();
+
+        // 兼容旧 background 直接返回最终结果的路径。
+        finishManualLottery(response);
     } catch (error) {
+        resetManualLotteryWaiting();
+        setManualLotteryButtonBusy(false);
         showError(error.message || '抽奖过程出现错误');
-    } finally {
-        button.disabled = false;
-        button.innerHTML = '<span class="btn-icon">🎰</span><span>立即抽奖</span>';
     }
+}
+
+function setManualLotteryButtonBusy(busy) {
+    elements.manualLotteryBtn.disabled = busy;
+    elements.manualLotteryBtn.innerHTML = busy
+        ? '<span class="btn-icon">🎰</span><span>抽奖中...</span>'
+        : '<span class="btn-icon">🎰</span><span>立即抽奖</span>';
+}
+
+function resetManualLotteryWaiting() {
+    manualLotteryWaiting = false;
+    if (manualLotteryTimeoutId) {
+        clearTimeout(manualLotteryTimeoutId);
+        manualLotteryTimeoutId = null;
+    }
+}
+
+async function finishManualLottery(result) {
+    resetManualLotteryWaiting();
+    setManualLotteryButtonBusy(false);
+
+    const lottery = result && result.lottery ? result.lottery : result;
+    if (!result || result.success === false || !lottery || lottery.status === 'failed') {
+        showError((lottery && lottery.message) || (result && result.message) || '抽奖失败');
+    } else if (lottery.status === 'won') {
+        showSuccess(lottery.prizeName ? `抽中：${lottery.prizeName}` : '抽奖成功');
+    } else {
+        showSuccess(lottery.message || '今日无免费抽奖机会');
+    }
+
+    await refreshLotteryStatus();
+    updateCurrentPoint();
 }
 
 // 清理手动签到的等待状态与超时定时器
