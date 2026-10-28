@@ -33,7 +33,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Playwright 复用的 profile 会缓存 background.js**：Chrome 会缓存扩展的 service worker 脚本，改完 `background.js` 重启仍跑旧代码；而 `content.js` 会正常更新，极易误判「改了没用」。`e2e-checkin.js` 已在启动前删掉 `Default/Service Worker`、`Default/Extension Scripts`（登录态不受影响）。手动调试时若 background 行为诡异，先怀疑这里。
 - **`chrome://extensions` 手动重载同理**：改 `background.js` 后必须 terminate 并重载 service worker，否则跑的还是旧逻辑。
 - **`.gitignore` 里有 `docs/`**，但现有文档都是当初 `git add -f` 强塞进去的。新增/修改 `docs/` 下的文件必须用 `git add -f`，否则静默被忽略。
-- **`tests/` 目前未被 git 跟踪**（`git status` 显示 `?? tests/`），本地可跑但尚未提交。
+- **`tests/` 已纳入 git 跟踪**；`.gitignore` 忽略的是单数 `test/`（本地草稿目录），不要混淆。
+- **扩展签名私钥不能放在扩展目录里**：`manifest.json` 的 `key` 是公钥，用于固定扩展 ID（`eoeiplimcehkebhoclogmekjlopgndjd`，跨设备 `chrome.storage.sync` 同步依赖它）。私钥放在仓库**之外**（当前为 `../juejin_qiandao-keys/juejin-qiandao.pem`）——扩展目录内存在 `*.pem` 时，`chrome://extensions` 会一直报「此扩展程序包含密钥文件」。
+- **`chrome.storage.sync` 按扩展 ID 分区**：换 ID 等于换一个同步命名空间，旧 ID 上传的记录不会自动迁移。排查「另一台电脑看不到记录」时，先确认两台机器的扩展 ID 一致。
 
 ## 项目架构
 
@@ -80,7 +82,7 @@ shared/
 
 | 文件 | 职责 | 关键功能 |
 |------|------|----------|
-| **manifest.json** | 插件配置文件 | 声明权限、配置脚本注入、定义基本信息 |
+| **manifest.json** | 插件配置文件 | 声明权限、配置脚本注入、**内联 `key` 固定扩展 ID**（跨设备 sync 依赖） |
 | **background.js** | Service Worker 后台服务 | 定时任务(Alarms API)、消息通信、存储管理、标签页操作、API 降级签到 |
 | **content.js** | 页面注入脚本 | 查找签到按钮、执行点击、检测签到状态、API 降级签到 |
 | **popup.html/js/css** | 弹出窗口 | 快速签到、状态展示、统计信息、快速设置 |
@@ -161,7 +163,7 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 1. **API 查询**（最准确）：调用掘金 API 查询今日签到状态
 2. **页面文字检测**：查找"今日已签到"、"已经打卡"等文字
 3. **按钮状态检测**：检查按钮文本和 disabled 属性
-4. **服务端验证**：点击后检查返回的错误码（err_no: 10001 表示重复签到）
+4. **服务端验证**：点击后检查返回的错误码（线上 `err_no: 15001` 表示重复签到，`10001` 为旧值）
 
 **重要**: 重复签到应返回 `{ success: true, alreadyCheckedIn: true }`，而不是错误。
 
@@ -178,12 +180,14 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 **重试机制跨 service worker 生命周期**：MV3 下 service worker 可能被随时终止，因此 `scheduleCheckInRetry()` 把 state（tabId/config/重试计数）持久化到 `chrome.storage.session`，再创建 `checkInRetry` 闹钟；闹钟触发时从 session 恢复 state 继续，用完即删。重试上限由 `config.retryCount` 驱动（options 可选 0-3 次）：`maxRetries = retryCount + 1`（含首次尝试），字段缺失或非法时回退默认 1 次重试。
 
+**签到标签页的兜底清理**：`closeTabQuietly()` 延迟关闭标签页，同时把 tabId 写进 `chrome.storage.session.orphanTabId`——因为 SW 休眠会丢掉 `setTimeout`，标签页可能残留。下次 `onStartup` 调 `cleanupOrphanTab()` 兜底关闭，**只关仍是掘金页的 tab**，防止 tabId 被浏览器复用后误关用户页面。
+
 **掘金 API 端点**：
 
 | 端点 | 用途与判据 |
 |---|---|
 | `GET growth_api/v2/get_today_status` | 今日签到状态。**当前字段是 `check_in_done`**；`today_status` / `has_check_in` 已从响应中消失，代码保留兼容，新增判据以 `check_in_done` 为主 |
-| `POST growth_api/v1/check_in` | `err_no === 0` 成功；`err_no === 10001` 或 `err_msg` 含"重复"/"已经"为重复签到 |
+| `POST growth_api/v1/check_in` | `err_no === 0` 成功；**线上实测重复签到返回 `15001`**（`10001` 为旧值，保留兼容），`err_msg` 含"重复"/"已经"也判重复 |
 | `GET growth_api/v1/get_counts` | 服务端统计：`cont_count`=连续签到天数，`sum_count`=累计天数 |
 | `GET growth_api/v1/get_by_month` | 本月逐日明细 `{date, status, point}` |
 | `GET growth_api/v1/get_cur_point` | **当前矿石总数**（`data` 直接是数字）；**同时用它判登录态**：未登录返回 `err_no:403 must login` |
@@ -281,6 +285,17 @@ MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content sc
 
 另用 `chrome.storage.session` 存 `checkInRetry`（重试恢复状态，见上节）。
 
+## 云端签到（GitHub Actions）
+
+扩展的 `chrome.alarms` 依赖本机浏览器常驻，**电脑关机 / 休眠 / 断网就漏签**。所以仓库另有一套云端签到，两者天然幂等（重复签到返回 `15001`，两边都判 `alreadyCheckedIn`）；扩展的连续 / 累计 / 本月天数本就以服务端为准，popup 打开时自动同步云端结果。
+
+- 入口：`.github/workflows/checkin.yml`（workflow 名「掘金签到」），核心逻辑 [scripts/checkin.mjs](scripts/checkin.mjs)。`schedule` 已启用：`cron: '20 0 * * *'` → 北京时间每天 8:20（**GitHub cron 是 UTC**），另有 `workflow_dispatch`。
+- **必须用 Playwright，不能用纯 fetch/curl**：`POST check_in` 依赖 `x-secsdk-csrf-token` + `msToken` / `ttwid` 风控参数；**缺失时接口返回 HTTP 200 + 空 body**（不是报错，极易误判成功），必须加载真实页面让 JS 种出这些值，再在页面主世界发请求。
+- 本地跑：`JUEJIN_COOKIE='...' node scripts/checkin.mjs`，`--dry-run` 只查询，`--headed` 显示窗口。Cookie 只从环境变量读，日志只回显长度。
+- Secret 配在**仓库**级 `JUEJIN_COOKIE`（不是账号级）。等同账号钥匙，绝不能进仓库。
+- `package-lock.json` 必须提交：workflow 用 `npm ci` 锁定 playwright 版本。
+- `.github/workflows/schedule-probe.yml` 是排查 schedule 是否触发的临时诊断 workflow（每 5 分钟），查清后应删除。
+
 ## 关键开发注意事项
 
 ### Manifest V3 特性
@@ -355,7 +370,11 @@ MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content sc
 
 ### 修改定时任务逻辑
 
-修改 [background.js](background.js) 中的 `setupDailyAlarm()` 函数。
+修改 [background.js](background.js) 中的 `setupDailyAlarm()` 函数。它同时创建三个闹钟：`dailyCheckIn`（每日签到）、`checkInRetry`（重试）、`missedCheckInWatch`（过点未签巡查，30 分钟周期）。改动后需同步 `npm run test:missed`。
+
+### 修改抽奖日期归属
+
+统一用 [shared/date.js](shared/date.js) 的 `toLotteryDateKey()`（固定 UTC+8），**不要**用 `getFullYear()` / `getDate()`——它们读设备本地时区，跨时区会把同一记录归到不同天，`lottery:YYYY-MM-DD` 的同步 key 也会对不上。改完跑 `npm run test:date`。
 
 ### 调整通知设置
 
