@@ -14,8 +14,7 @@
     "host_permissions": [
         "https://juejin.cn/*",
         "https://*.juejin.cn/*",
-        "https://raw.githubusercontent.com/*",
-        "https://api.github.com/*"
+        "https://raw.githubusercontent.com/*"
     ],
     "background": {
         "service_worker": "background.js"

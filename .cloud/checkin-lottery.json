@@ -5,7 +5,8 @@
     "date": "2026-10-27T23:26:24.826Z",
     "status": "checked",
     "contCount": 32,
-    "sumCount": 375
+    "sumCount": 375,
+    "source": "cloud"
   },
   "records": [
     {
@@ -47,6 +48,15 @@
       "lotteryType": null,
       "message": "今日无免费抽奖机会",
       "freeCount": 0
+    }
+  ],
+  "checkIns": [
+    {
+      "date": "2026-10-27T23:26:24.826Z",
+      "status": "checked",
+      "contCount": 32,
+      "sumCount": 375,
+      "source": "cloud"
     }
   ]
 }

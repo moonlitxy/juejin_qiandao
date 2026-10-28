@@ -202,6 +202,8 @@ chrome.runtime.sendMessage({ action: 'checkInCompleted', result })
 
 **抽奖记录的留存与同步**：本机流水存 `config.lotteryHistory`（最近90条，含 skipped / failed）。开启 `syncLottery` 时，抽奖后额外写 `chrome.storage.sync` 的 `lottery:YYYY-MM-DD`——**按天一个 key**，规避 sync 单项 8KB 限制；**key 里的日期按 UTC+8 计算**（`toLotteryDateKey`），读端也用它重新归类，设备时区不影响归属（未登录 Chrome 账号时 sync 退化为本地存储，不报错）。设置页通过 `getLotteryLog` 取「本机流水 ∪ 已同步记录」，按天聚合（同一天优先 `won`），再由 `renderLotteryCalendar` 按选中年月铺成月历（默认当前月，可翻月）。
 
+**签到记录的跨设备同步**：开启 `syncCheckIn`（默认开启）时，签到成功后会写 `chrome.storage.sync` 的 `checkin:YYYY-MM-DD`，按天一个 key，日期同样按 UTC+8 计算。`syncCheckInRecordsFromStorage()` 在 popup 打开（`syncCheckInStatus`）和浏览器启动时合并其他设备的记录：按日期去重补进 `config.checkInHistory`，其他设备今天已签时补写 `lastCheckInDate`，避免本机重复签到。同步记录保留 90 天，由 `pruneCheckInSyncRecords()` 清理。**插件不写 GitHub**，云端结果只读。
+
 **popup 的抽奖行也看同步记录**：`config.lotteryResult` 只存本机，本机没抽（skipped）时无法反映别处的战果。为此 popup 改走 `getTodayLottery`，由 `getTodayLotteryResult()` 取「本机流水 ∪ 同步记录 ∪ 已有 lotteryResult」里今天的记录，**中奖优先**。两条写入规则配合：① `saveLotteryResult` 写 `chrome.storage.sync` 前先查同一天的已有记录，对方已中奖则**不再写入本机的 skipped/failed**（否则会覆盖掉对方的中奖，两边 popup 都看不到奖品）；② 同步记录到达时 `storage.onChanged`（area `sync`）触发 `refreshLotteryResultFromSync()` 把今日中奖补写进本地 `lotteryResult`。
 
 **签到日历做不到跨月（别再白试）**：掘金 `get_by_month` **不接受任何月份参数**——实测 `?month=2026-09`、`?year=2026&month=9`、`?date=`、`?query=` 等 7 种写法返回的是同一段数据（约 31 天）。服务端只提供这一段，插件本地也只有近 30 条 `checkInHistory`，所以签到日历只能显示服务端给的当前区间。抽奖日历不受此限，因为数据存在本机与 `chrome.storage.sync`。
@@ -266,7 +268,11 @@ MV3 的 service worker 空闲约 30 秒就会被浏览器终止，而 content sc
         autoLottery: true,          // 自动抽奖开关（仅签到成功后生效）
         lotteryResult: null,        // 最近一次抽奖结果（供 popup 渲染）
         lotteryHistory: [],         // 抽奖历史记录（最近90条，本机流水）
-        syncLottery: true           // 抽奖记录同步到其他设备（chrome.storage.sync）
+        syncCheckIn: true,          // 签到记录同步到其他设备（chrome.storage.sync）
+        syncLottery: true,          // 抽奖记录同步到其他设备（chrome.storage.sync）
+        cloudLotterySync: false,    // 只读拉取 GitHub Actions 云端结果
+        githubRepo: '',             // 云端结果仓库 owner/repo
+        cloudRepoConfirmed: false   // 是否已确认使用该仓库
     }
 }
 ```

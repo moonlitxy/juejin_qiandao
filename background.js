@@ -15,7 +15,8 @@ const PENDING_CHECK_IN_RETRY_MIN = 10;
 const CLOUD_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const CLOUD_RESULT_PATH = '.cloud/checkin-lottery.json';
 const CLOUD_RESULT_HISTORY_LIMIT = 90;
-const GITHUB_TOKEN_STORAGE_KEY = 'githubLotteryToken';
+const CHECK_IN_SYNC_PREFIX = 'checkin:';
+const CHECK_IN_SYNC_RETENTION_DAYS = 90;
 const CURRENT_POINT_CACHE_KEY = 'currentPointCache';
 const CURRENT_POINT_CACHE_MS = 60 * 1000;
 const CURRENT_POINT_TIMEOUT_MS = 8 * 1000;
@@ -36,6 +37,10 @@ function isCheckInPageUrl(url) {
 // 插件安装或更新时初始化
 chrome.runtime.onInstalled.addListener(async () => {
     console.log('掘金签到插件已安装');
+
+    // 旧版本把 GitHub PAT 存在本地；现在插件只读云端结果，
+    // 升级时直接清除残留凭证，避免继续留在一台机器上。
+    await chrome.storage.local.remove('githubLotteryToken').catch(() => {});
 
     // 保存默认配置到存储（await 保证回调完成后再读，避免下面读到旧状态）
     await chrome.storage.local.get(['config'], (result) => {
@@ -132,6 +137,10 @@ function getNextScheduleTime(hours, minutes) {
 chrome.runtime.onStartup.addListener(async () => {
     // 上次关闭前没来得及关的签到标签页
     await cleanupOrphanTab();
+
+    // 先合并其他设备通过 Chrome/Edge 账号同步来的签到记录
+    await syncCheckInRecordsFromStorage();
+    await pruneCheckInSyncRecords();
 
     // 云端可能已经签到并抽奖，先拉一次结果再判断过点补签
     await syncCloudCheckInResult();
@@ -545,13 +554,6 @@ async function finalizeCheckInSuccess(result, config, tabId = null) {
         lottery = await runLottery(tabId);
         const saved = await saveLotteryResult(lottery);
 
-        // 本机用掉免费次数后把结果回传 GitHub；中奖必传，skipped/failed 也传
-        // （云端文件据此知道今天已有本机记录，避免云端同步误补或与云端结果对不上）。
-        // best-effort，失败不影响签到与抽奖结果。
-        if (saved) {
-            await syncLotteryResultToGitHub(saved).catch(() => {});
-        }
-
         // 抽到奖品或抽奖失败时补一次广播，让已打开的 popup 刷新抽奖行
         // skipped 也要广播：popup 与设置页需要立即显示“无免费次数”
         if (lottery.status === 'won' || lottery.status === 'failed' || lottery.status === 'skipped') {
@@ -857,22 +859,32 @@ async function syncCheckInStatusFromServer() {
 
     let changed = false;
 
+    // 先合并其他设备同步来的签到记录，再由服务端状态补写/校验
+    if (await syncCheckInRecordsFromStorage()) {
+        changed = true;
+    }
+
     // 先合并云端结果：云端先签时，这一步会把 lastCheckInDate / 抽奖记录补进本地
     if (await syncCloudCheckInResult()) {
         changed = true;
     }
+
+    // 上面两个同步都可能补写 lastCheckInDate / checkInHistory，
+    // 必须用最新配置继续校验，旧快照会让 updateCheckInHistory 重复写或覆盖合并结果。
+    const latestStorage = await chrome.storage.local.get(['config']);
+    const latestConfig = latestStorage.config || config;
 
     // 今日签到状态（后面统计本月天数也要用）
     const status = await fetchTodayCheckInFromServer();
     const checkedIn = status.ok && status.checkedIn === true;
 
     // 服务端已签到但本地无记录（网页签到 / 多设备 / 重装）→ 补写本地
-    if (config.lastCheckInDate !== today) {
+    if (latestConfig.lastCheckInDate !== today) {
         if (checkedIn) {
             console.log('🔄 服务端已签到但本地无记录，补写本地签到状态');
             await updateCheckInHistory(
                 { success: true, alreadyCheckedIn: true, message: '今天已经签到过了' },
-                config
+                latestConfig
             );
             changed = true;
         } else if (!status.ok) {
@@ -1207,7 +1219,7 @@ async function runLottery(tabId) {
 
 /**
  * 插件内手动抽奖：独立于签到，仍然先查免费次数。
- * 结果写入本地流水（含 skipped），中奖时按开关回传 GitHub。
+ * 结果写入本地流水（含 skipped），并按 syncLottery 跨设备同步。
  */
 async function runManualLottery() {
     let tabId = null;
@@ -1226,19 +1238,13 @@ async function runManualLottery() {
         }
 
         const lottery = await runLottery(tabId);
-        const saved = await saveLotteryResult(lottery);
-        // 中奖必传；无免费次数/失败也传，云端文件保持「今天已抽过」，
-        // 避免云端同步误以为本机没抽而补传或与云端结果对不上。
-        const cloudPushed = saved
-            ? await syncLotteryResultToGitHub(saved).catch(() => false)
-            : false;
+        await saveLotteryResult(lottery);
 
         const result = {
             success: lottery.status !== 'failed',
             status: lottery.status,
             prizeName: lottery.prizeName || null,
             message: lottery.message,
-            cloudSync: cloudPushed,
             lottery
         };
         // 复用签到完成广播，popup 会同时刷新签到状态、抽奖行和矿石数；
@@ -1417,8 +1423,8 @@ async function saveLotteryResult(lottery) {
  *
  * 云端和扩展是两个独立执行者：
  * - 云端签到成功后，扩展的 performCheckIn 会因 lastCheckInDate 提前返回；
- * - 云端抽奖结果只能通过仓库文件回传，扩展无法直接读 chrome.storage.sync。
- * 因此这里做一次 best-effort 同步，失败不影响本地签到与抽奖。
+ * - 云端抽奖结果只通过仓库文件单向下发，扩展不写 GitHub。
+ * 因此这里做一次 best-effort 只读同步，失败不影响本地签到与抽奖。
  */
 async function syncCloudCheckInResult(force = false) {
     if (!force && Date.now() - lastCloudSyncAt < CLOUD_SYNC_INTERVAL_MS) {
@@ -1430,7 +1436,10 @@ async function syncCloudCheckInResult(force = false) {
     try {
         const { config: storedConfig } = await chrome.storage.local.get(['config']);
         const config = { ...DEFAULT_CONFIG, ...(storedConfig || {}) };
-        if (config.cloudLotterySync !== true
+        // 本机只读云端结果：签到历史与抽奖结果共用 cloudLotterySync 开关。
+        // 插件不再使用 PAT 写 GitHub；跨设备同步由 chrome.storage.sync 负责。
+        const cloudSync = config.cloudLotterySync === true;
+        if (!cloudSync
             || config.cloudRepoConfirmed !== true
             || !isValidGitHubRepo(config.githubRepo)) {
             return false;
@@ -1450,22 +1459,39 @@ async function syncCloudCheckInResult(force = false) {
 
         // 云端签到状态补写本地：云端先签时，扩展的 performCheckIn 会提前返回，
         // 不补 lastCheckInDate 就会一直显示"未签到"，并可能再次打开页面签到
-        const lastCheckIn = merged.lastCheckInDate ? new Date(merged.lastCheckInDate) : null;
-        const localCheckedToday = !!lastCheckIn && toDateKey(lastCheckIn) === today;
         const checkIn = payload.latestCheckIn;
+        const cloudCheckIns = Array.isArray(payload.checkIns) ? payload.checkIns : [];
+        // 兼容旧版云端文件：只有 latestCheckIn、没有 checkIns 历史
+        const candidates = cloudCheckIns.length > 0
+            ? cloudCheckIns
+            : (checkIn ? [checkIn] : []);
+
+        if (mergeCloudCheckInHistory(merged, candidates)) {
+            await chrome.storage.local.set({ config: merged });
+            changed = true;
+        }
+
         if (checkIn && toDateKey(checkIn.date) === today
             && (checkIn.status === 'checked' || checkIn.status === 'already_checked')
             && merged.lastCheckInDate !== now.toDateString()) {
-            await updateCheckInHistory(
-                { success: true, alreadyCheckedIn: true, message: '云端已签到' },
-                merged
-            );
+            // checkIns 可能已经把今天合并进历史了；此时只补 lastCheckInDate，
+            // 再调用 updateCheckInHistory 会重复写一条同日记录。
+            const hasTodayRecord = (merged.checkInHistory || []).some(item =>
+                item && item.status === 'success' && toDateKey(item.date) === today);
+            if (hasTodayRecord) {
+                merged.lastCheckInDate = now.toDateString();
+                await chrome.storage.local.set({ config: merged });
+            } else {
+                await updateCheckInHistory(
+                    { success: true, alreadyCheckedIn: true, message: '云端已签到' },
+                    merged
+                );
+            }
             changed = true;
         }
 
         const todayRecords = records.filter(record => record && toDateKey(record.date) === today);
         if (todayRecords.length === 0) {
-            await pushLocalLotteryIfMissing(merged, records, today, now, config);
             return changed;
         }
 
@@ -1497,14 +1523,11 @@ async function syncCloudCheckInResult(force = false) {
         const cloudRecord = todayRecords.find(record => record.status === 'won') || todayRecords[0];
 
         // 本地已有今日中奖时保留本地；否则以云端结果为准。
-        // 本地中奖但云端文件里没有时（本机直签、Actions 当天没跑），顺手把它补进云端文件，
-        // 让云端仓库与抽奖日历一致；补传失败不影响本地结果。
         const localTodayWin = merged.lotteryResult
             && merged.lotteryResult.status === 'won'
             && toDateKey(merged.lotteryResult.date) === today;
         const cloudWon = cloudRecord.status === 'won';
         if (localTodayWin && !cloudWon) {
-            await pushLocalLotteryIfMissing(merged, records, today, now, config);
             return changed;
         }
 
@@ -1550,34 +1573,52 @@ async function syncCloudCheckInResult(force = false) {
 }
 
 /**
- * 本机今日已抽奖、但云端结果文件里还没有今天的记录时，把它补传上去。
+ * 把云端签到历史合并进本地 checkInHistory。
  *
- * 前提（缺一不可，否则不发任何请求）：
- * - 用户已配置自己的仓库并确认：cloudLotterySync + cloudRepoConfirmed + githubRepo；
- * - 本机开了「本机抽奖回传」并配置了 Token；
- * - 本机今天确实签到过（lastCheckInDate 是今天）——只有这时本机抽到的才来自自己的账号；
- * - 本机今日流水里有「真正抽过」的记录（won / failed，skipped 说明没消耗免费次数）。
+ * 签到历史按 UTC+8 的日期去重：本机、其他设备与云端签到会指向同一天，
+ * 不能因为时间戳不同就写成两条。外部记录只补本地缺失的日期，不覆盖本机
+ * 已有记录（本机记录可能带更准确的连续天数来源）。
  *
- * 只上传奖品名、状态等抽奖元数据，绝不包含 cookie、token 或账号信息。
+ * @returns {boolean} 是否有新增记录
  */
-async function pushLocalLotteryIfMissing(merged, records, today, now, config) {
-    if (config.githubLotterySync !== true) {
+function mergeCloudCheckInHistory(config, cloudCheckIns) {
+    const existing = Array.isArray(config.checkInHistory) ? config.checkInHistory : [];
+    const knownDays = new Set(
+        existing.map(record => toDateKey(record && record.date)).filter(Boolean)
+    );
+    const added = [];
+
+    for (const record of cloudCheckIns) {
+        if (!record || !record.date) {
+            continue;
+        }
+        if (record.status !== 'checked' && record.status !== 'already_checked') {
+            continue;
+        }
+        const day = toDateKey(record.date);
+        if (!day || knownDays.has(day)) {
+            continue;
+        }
+        knownDays.add(day);
+        added.push({
+            date: record.date,
+            status: 'success',
+            message: record.source === 'sync'
+                ? '其他设备签到'
+                : '云端签到',
+            alreadyCheckedIn: record.status === 'already_checked',
+            source: record.source || 'cloud'
+        });
+    }
+
+    if (added.length === 0) {
         return false;
     }
-    if (records.some(record => record && toDateKey(record.date) === today)) {
-        return false;
-    }
-    const lastCheckIn = merged.lastCheckInDate ? new Date(merged.lastCheckInDate) : null;
-    if (!lastCheckIn || toDateKey(lastCheckIn) !== today) {
-        return false;
-    }
-    const candidate = (merged.lotteryHistory || []).find(record =>
-        record && toDateKey(record.date) === today
-        && (record.status === 'won' || record.status === 'failed'));
-    if (!candidate) {
-        return false;
-    }
-    return syncLotteryResultToGitHub(candidate, records).catch(() => false);
+
+    config.checkInHistory = [...existing, ...added]
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 30);
+    return true;
 }
 
 /** 仓库名必须是 owner/repo，避免空配置拼出无效 URL */
@@ -1588,148 +1629,6 @@ function isValidGitHubRepo(repo) {
 /** 云端结果文件的公开读取地址 */
 function getCloudResultUrl(repo, timestamp) {
     return `https://raw.githubusercontent.com/${repo}/main/${CLOUD_RESULT_PATH}?t=${timestamp}`;
-}
-
-/**
- * 把本机抽中的免费奖品合并进 GitHub 仓库的云端结果文件。
- *
- * 使用 fine-grained PAT 直接走 GitHub Contents API：
- * - 只允许该仓库 Contents: Read and write，不能操作其他仓库；
- * - Token 单独存 chrome.storage.local，不进入 config，因此不会随
- *   chrome.storage.sync 同步到其他设备；
- * - 文件并发更新时用最新 SHA 重试一次，避免覆盖 Actions 刚写的结果。
- *
- * @param {object} record 本机抽奖结果（只取 date/status/prizeName/prizeImage/lotteryType/message/freeCount）
- * @param {Array} [knownRecords] 调用方刚拿到的云端记录；传入时跳过读取请求，趁现有 SHA 直接写入
- */
-async function syncLotteryResultToGitHub(record, knownRecords) {
-    const storage = await chrome.storage.local.get(['config', GITHUB_TOKEN_STORAGE_KEY]);
-    const config = { ...DEFAULT_CONFIG, ...(storage.config || {}) };
-    const token = storage[GITHUB_TOKEN_STORAGE_KEY] || '';
-
-    // 前置检查一次做完：未开回传、仓库未确认或填错、没有 Token 一律不发请求
-    if (config.githubLotterySync !== true
-        || config.cloudRepoConfirmed !== true
-        || !isValidGitHubRepo(config.githubRepo)) {
-        return false;
-    }
-    if (!token) {
-        console.log('ℹ️ 未配置 GitHub Token，跳过本机抽奖回传');
-        return false;
-    }
-
-    const apiUrl = `https://api.github.com/repos/${config.githubRepo}/contents/${CLOUD_RESULT_PATH}`;
-    const headers = {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'
-    };
-
-    // 调用方已拉到最新文件时不重复读；否则读取（含冲突后的重读）以拿最新 SHA
-    let previous = Array.isArray(knownRecords) ? { records: knownRecords } : null;
-
-    // 最多重试一次：拿到最新 SHA 后重算，仍冲突就留给下次
-    for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-            let sha;
-            if (!previous) {
-                const getRes = await fetch(`${apiUrl}?ref=main&t=${Date.now()}`, {
-                    headers,
-                    cache: 'no-store'
-                });
-                if (!getRes.ok) {
-                    throw new Error(`读取结果文件失败 HTTP ${getRes.status}`);
-                }
-                const file = await getRes.json();
-                sha = file.sha;
-                previous = JSON.parse(base64ToUtf8(file.content || ''));
-            }
-            const records = Array.isArray(previous.records) ? previous.records : [];
-
-            // 同一奖品（同日期+状态+奖品名）不重复写入
-            const duplicate = records.some(item =>
-                item && toDateKey(item.date) === toDateKey(record.date)
-                && item.status === record.status
-                && item.prizeName === record.prizeName);
-            if (duplicate) {
-                return false;
-            }
-
-            // 云端文件里已有今天的中奖时不上传本机的 skipped/failed，避免盖章盖掉奖品
-            const cloudWonToday = records.some(item =>
-                item && toDateKey(item.date) === toDateKey(record.date) && item.status === 'won');
-            if (cloudWonToday && record.status !== 'won') {
-                return false;
-            }
-            const replaceWon = record.status === 'won';
-            const keptRecords = replaceWon
-                ? records.filter(item => !(item && toDateKey(item.date) === toDateKey(record.date) && item.status === 'won'))
-                : records;
-
-            const normalized = {
-                date: record.date,
-                runId: `extension-${Date.now()}`,
-                status: record.status,
-                prizeName: record.prizeName || null,
-                prizeImage: record.prizeImage || null,
-                lotteryType: record.lotteryType ?? null,
-                message: record.message || '',
-                freeCount: record.freeCount ?? null,
-                source: 'extension'
-            };
-            const payload = {
-                version: 1,
-                ...previous,
-                updatedAt: new Date().toISOString(),
-                latestCheckIn: previous.latestCheckIn || null,
-                records: [normalized, ...keptRecords].slice(0, CLOUD_RESULT_HISTORY_LIMIT)
-            };
-
-            const putRes = await fetch(apiUrl, {
-                method: 'PUT',
-                headers: { ...headers, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: `chore: 同步本机抽奖奖品 ${normalized.prizeName || ''}`.trim(),
-                    content: utf8ToBase64(JSON.stringify(payload, null, 2) + '\n'),
-                    sha,
-                    branch: 'main'
-                })
-            });
-
-            if (putRes.ok) {
-                console.log('🔄 本机抽奖结果已回传 GitHub:', normalized.prizeName);
-                // raw.githubusercontent.com 有 CDN 缓存，稍后再拉一次，
-                // 让本机回传的记录与云端文件合并且不被旧内容覆盖
-                lastCloudSyncAt = 0;
-                return true;
-            }
-            if (putRes.status !== 409 && putRes.status !== 422) {
-                throw new Error(`写入结果文件失败 HTTP ${putRes.status}`);
-            }
-            // SHA 冲突：下一轮重新读取最新文件后重试
-            previous = null;
-        } catch (error) {
-            if (attempt === 1) {
-                console.log('ℹ️ 本机抽奖回传 GitHub 失败:', error.message);
-                return false;
-            }
-        }
-    }
-    return false;
-}
-
-// Chrome 扩展没有 atob/btoa 之外的依赖，这里处理 UTF-8 奖品名
-function utf8ToBase64(text) {
-    const bytes = new TextEncoder().encode(text);
-    let binary = '';
-    bytes.forEach(byte => { binary += String.fromCharCode(byte); });
-    return btoa(binary);
-}
-
-function base64ToUtf8(base64) {
-    const binary = atob(base64.replace(/\s/g, ''));
-    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
 }
 
 // 等待标签页加载完成。轮询 chrome.tabs.get 既能在页面卡住时可靠超时，
@@ -1829,6 +1728,29 @@ async function updateCheckInHistory(result, config = null) {
             // （重复签到不会改 lastCheckInDate，巡查仍需继续盯着）
             if (signedByThisRun) {
                 chrome.alarms.clear(MISSED_CHECK_IN_ALARM);
+            }
+
+            // 签到成功后写入 Chrome/Edge 账号同步区，供另一台设备合并。
+            // 按 UTC+8 日期一个 key，避免同日多写与单项 8KB 限制。
+            if (config.syncCheckIn !== false) {
+                try {
+                    const syncKey = CHECK_IN_SYNC_PREFIX + toDateKey(record.date);
+                    const existing = (await chrome.storage.sync.get([syncKey]))[syncKey];
+                    if (!existing || existing.status !== 'success') {
+                        await chrome.storage.sync.set({
+                            [syncKey]: {
+                                date: record.date,
+                                status: 'success',
+                                message: record.message || '',
+                                alreadyCheckedIn: record.alreadyCheckedIn || false
+                            }
+                        });
+                        console.log('🔄 签到记录已同步:', syncKey);
+                        await pruneCheckInSyncRecords();
+                    }
+                } catch (error) {
+                    console.log('ℹ️ 签到记录同步失败:', error.message);
+                }
             }
 
         } else {
@@ -1993,32 +1915,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    if (request.action === 'getGitHubTokenStatus') {
-        // 只返回是否已配置，绝不把 Token 原文送到设置页
-        chrome.storage.local.get([GITHUB_TOKEN_STORAGE_KEY], (result) => {
-            sendResponse({ configured: !!result[GITHUB_TOKEN_STORAGE_KEY] });
-        });
-        return true;
-    }
-
-    if (request.action === 'saveGitHubToken') {
-        // Token 单独存，不写进 config：config 会同步到 UI，也更容易被误导出
-        const token = String(request.token || '').trim();
-        if (!token) {
-            chrome.storage.local.remove(GITHUB_TOKEN_STORAGE_KEY, () => {
-                sendResponse({ success: true, configured: false });
-            });
-            return true;
-        }
-        if (!/^github_pat_|^ghp_/.test(token)) {
-            sendResponse({ success: false, message: 'Token 格式不正确，请使用 GitHub PAT' });
-            return true;
-        }
-        chrome.storage.local.set({ [GITHUB_TOKEN_STORAGE_KEY]: token }, () => {
-            sendResponse({ success: true, configured: true });
-        });
-        return true;
-    }
 });
 
 // 其他设备经由 chrome.storage.sync 同步来的抽奖记录到达时，把今天的聚合结果
@@ -2054,9 +1950,88 @@ async function refreshLotteryResultFromSync() {
     }
 }
 
+/**
+ * 从 chrome.storage.sync 合并其他设备同步来的签到记录。
+ *
+ * key 形如 checkin:YYYY-MM-DD（UTC+8），value 为当天签到结果。
+ * 本机只补缺失的日期，不覆盖已有记录；同步来的今天记录也会补写
+ * lastCheckInDate，避免另一台设备先签后本机仍去重复签到。
+ *
+ * @returns {Promise<boolean>} 是否有本地更新
+ */
+async function syncCheckInRecordsFromStorage() {
+    try {
+        const { config: storedConfig } = await chrome.storage.local.get(['config']);
+        const config = { ...DEFAULT_CONFIG, ...(storedConfig || {}) };
+        if (config.syncCheckIn === false) {
+            return false;
+        }
+
+        const synced = await chrome.storage.sync.get(null);
+        const records = Object.entries(synced)
+            .filter(([key, value]) =>
+                key.startsWith(CHECK_IN_SYNC_PREFIX)
+                && value && value.date && value.status === 'success')
+            .map(([, value]) => ({
+                date: value.date,
+                status: value.alreadyCheckedIn ? 'already_checked' : 'checked',
+                message: value.message || '其他设备签到',
+                alreadyCheckedIn: value.alreadyCheckedIn || false,
+                source: 'sync'
+            }));
+        if (records.length === 0) {
+            return false;
+        }
+
+        const before = JSON.stringify(config.checkInHistory || []);
+        mergeCloudCheckInHistory(config, records);
+        let changed = before !== JSON.stringify(config.checkInHistory || []);
+
+        // 其他设备今天已签 → 本机标记今日已签，避免重复打开页面
+        const today = toDateKey(new Date());
+        const todaySynced = records.some(record => toDateKey(record.date) === today);
+        if (todaySynced && config.lastCheckInDate !== new Date().toDateString()) {
+            config.lastCheckInDate = new Date().toDateString();
+            changed = true;
+        }
+
+        if (changed) {
+            await chrome.storage.local.set({ config });
+            console.log('🔄 已合并其他设备的签到记录:', records.length);
+        }
+        return changed;
+    } catch (error) {
+        console.log('ℹ️ 合并其他设备签到记录失败:', error.message);
+        return false;
+    }
+}
+
+/** 清理超过保留期的签到同步记录，避免 sync 配额持续增长 */
+async function pruneCheckInSyncRecords() {
+    try {
+        const synced = await chrome.storage.sync.get(null);
+        const cutoff = Date.now() - CHECK_IN_SYNC_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+        const expired = Object.keys(synced).filter(key => {
+            const value = synced[key];
+            return key.startsWith(CHECK_IN_SYNC_PREFIX)
+                && value && value.date
+                && new Date(value.date).getTime() < cutoff;
+        });
+        if (expired.length > 0) {
+            await chrome.storage.sync.remove(expired);
+        }
+    } catch (error) {
+        console.log('ℹ️ 清理签到同步记录失败:', error.message);
+    }
+}
+
 // 监听存储变化（用于配置更新时重设闹钟）
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync') {
+        const checkInChanged = Object.keys(changes).some(key => key.startsWith(CHECK_IN_SYNC_PREFIX));
+        if (checkInChanged) {
+            syncCheckInRecordsFromStorage();
+        }
         const lotteryChanged = Object.keys(changes).some(key => key.startsWith('lottery:'));
         if (lotteryChanged) {
             refreshLotteryResultFromSync();

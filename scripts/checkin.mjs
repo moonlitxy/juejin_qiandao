@@ -34,6 +34,7 @@ const RUN_ID = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT]
     .filter(Boolean)
     .join('-');
 const RESULT_HISTORY_LIMIT = 90;
+const CHECK_IN_HISTORY_LIMIT = 90;
 const LOTTERY_TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 // 签到入口页：加载它是为了让页面 JS 种下 msToken / ttwid / x-secsdk-csrf-token
@@ -139,18 +140,19 @@ function toDateKey(input) {
 /** 读取上一次的云端结果，保留最近 90 条，便于扩展补拉漏掉的日期 */
 function readCloudResult() {
     if (!RESULT_FILE || !fs.existsSync(RESULT_FILE)) {
-        return { version: 1, records: [] };
+        return { version: 1, records: [], checkIns: [] };
     }
     try {
         const data = JSON.parse(fs.readFileSync(RESULT_FILE, 'utf8'));
         return {
             version: 1,
             ...data,
-            records: Array.isArray(data.records) ? data.records : []
+            records: Array.isArray(data.records) ? data.records : [],
+            checkIns: Array.isArray(data.checkIns) ? data.checkIns : []
         };
     } catch (error) {
         console.warn(`⚠️ 云端结果文件无法解析，将重新生成: ${error.message}`);
-        return { version: 1, records: [] };
+        return { version: 1, records: [], checkIns: [] };
     }
 }
 
@@ -174,10 +176,35 @@ function writeCloudResult(checkIn, lottery) {
         records.unshift(lottery);
     }
 
+    // 签到历史同样落盘，扩展拉取后能补齐本机看不到的云端签到。
+    // 旧文件只有 latestCheckIn，先把它迁移进 checkIns 再写入本次记录。
+    const seedCheckIns = previous.checkIns.length > 0
+        ? previous.checkIns
+        : (previous.latestCheckIn ? [previous.latestCheckIn] : []);
+    const currentDay = checkIn && toDateKey(checkIn.date);
+    const checkIns = seedCheckIns
+        .filter((record) => record && record.date && (!currentDay || toDateKey(record.date) !== currentDay));
+    if (checkIn && currentDay) {
+        checkIns.unshift({
+            date: checkIn.date,
+            status: checkIn.status,
+            contCount: checkIn.contCount ?? null,
+            sumCount: checkIn.sumCount ?? null,
+            source: 'cloud'
+        });
+    }
+
+    // 保留旧文件里的 latestCheckIn / checkIns 等未知字段，扩展回传的签到
+    // （source: extension）不能在云端下一次运行时被整个覆盖掉。
     const payload = {
         version: 1,
+        ...previous,
         updatedAt: new Date().toISOString(),
         latestCheckIn: checkIn,
+        checkIns: checkIns
+            .filter((record) => record && record.date && record.status)
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, CHECK_IN_HISTORY_LIMIT),
         records: records
             .filter((record) => record && record.date && record.status)
             .sort((a, b) => new Date(b.date) - new Date(a.date))
@@ -223,6 +250,7 @@ async function main() {
         const checkInRecord = {
             date: new Date().toISOString(),
             status: alreadyCheckedIn ? 'already_checked' : 'checked',
+            source: 'cloud',
             contCount: counts.err_no === 0 && counts.data ? counts.data.cont_count : null,
             sumCount: counts.err_no === 0 && counts.data ? counts.data.sum_count : null
         };

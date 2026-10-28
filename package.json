@@ -8,7 +8,7 @@
         "test:ab": "node tests/simulate-checkin-timing.js --ab",
         "test:lottery": "node tests/simulate-lottery.js",
         "test:cloud-lottery": "node tests/simulate-cloud-lottery.mjs",
-        "test:github-sync": "node tests/simulate-github-lottery-sync.js",
+        "test:sync": "node tests/simulate-storage-sync.js",
         "test:missed": "node tests/simulate-missed-checkin.js",
         "test:date": "node tests/simulate-date-key.js",
         "test:stats": "node tests/simulate-checkin-stats.js"

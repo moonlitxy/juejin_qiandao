@@ -27,10 +27,10 @@ const FORM_FIELDS = [
     { key: 'enabled', el: 'enabledToggle', type: 'checked', fallback: v => v !== false },
     { key: 'checkInTime', el: 'checkInTime', type: 'value', fallback: v => v || DEFAULT_CONFIG.checkInTime },
     { key: 'autoLottery', el: 'autoLotteryToggle', type: 'checked', fallback: v => v !== false },
+    { key: 'syncCheckIn', el: 'checkInSyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'syncLottery', el: 'lotterySyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'cloudLotterySync', el: 'cloudLotterySyncToggle', type: 'checked', fallback: v => v !== false },
     { key: 'githubRepo', el: 'githubRepoInput', type: 'value', fallback: v => v || '' },
-    { key: 'githubLotterySync', el: 'githubLotterySyncToggle', type: 'checked', fallback: v => v === true },
     { key: 'successNotification', el: 'successNotification', type: 'checked', fallback: v => v },
     { key: 'failureNotification', el: 'failureNotification', type: 'checked', fallback: v => v },
     { key: 'retryCount', el: 'retryCount', type: 'value', fallback: v => v },
@@ -55,11 +55,10 @@ const elements = {
     lotteryCalendarGrid: null,
     lotteryPrevMonth: null,
     lotteryNextMonth: null,
+    checkInSyncToggle: null,
     lotterySyncToggle: null,
     cloudLotterySyncToggle: null,
     githubRepoInput: null,
-    githubLotterySyncToggle: null,
-    githubTokenInput: null,
     saveBtn: null,
     resetBtn: null,
     clearHistoryBtn: null,
@@ -87,11 +86,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.lotteryCalendarGrid = document.getElementById('lotteryCalendarGrid');
     elements.lotteryPrevMonth = document.getElementById('lotteryPrevMonth');
     elements.lotteryNextMonth = document.getElementById('lotteryNextMonth');
+    elements.checkInSyncToggle = document.getElementById('checkInSyncToggle');
     elements.lotterySyncToggle = document.getElementById('lotterySyncToggle');
     elements.cloudLotterySyncToggle = document.getElementById('cloudLotterySyncToggle');
     elements.githubRepoInput = document.getElementById('githubRepoInput');
-    elements.githubLotterySyncToggle = document.getElementById('githubLotterySyncToggle');
-    elements.githubTokenInput = document.getElementById('githubTokenInput');
     elements.saveBtn = document.getElementById('saveBtn');
     elements.resetBtn = document.getElementById('resetBtn');
     elements.clearHistoryBtn = document.getElementById('clearHistoryBtn');
@@ -104,9 +102,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 加载配置
     await loadConfig();
-
-    // Token 只回显「已配置」状态，不把原文写回输入框
-    await loadGitHubTokenStatus();
 
     // 加载签到日历（服务端本月明细）
     await loadCalendar();
@@ -149,7 +144,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             refreshFormFromStorage();
-            loadGitHubTokenStatus();
         }
     });
 });
@@ -388,11 +382,11 @@ async function saveConfig() {
             enabled: elements.enabledToggle.checked,
             checkInTime: elements.checkInTime.value,
             autoLottery: elements.autoLotteryToggle.checked,
+            syncCheckIn: elements.checkInSyncToggle.checked,
             syncLottery: elements.lotterySyncToggle.checked,
             cloudLotterySync: elements.cloudLotterySyncToggle.checked,
             githubRepo: elements.githubRepoInput.value.trim(),
             cloudRepoConfirmed: !!elements.githubRepoInput.value.trim(),
-            githubLotterySync: elements.githubLotterySyncToggle.checked,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,
             retryCount: parseInt(elements.retryCount.value),
@@ -405,17 +399,6 @@ async function saveConfig() {
             config: newConfig
         });
 
-        // Token 单独保存，不进 config / chrome.storage.sync
-        const token = elements.githubTokenInput.value.trim();
-        if (token) {
-            const tokenResult = await sendMessage({ action: 'saveGitHubToken', token });
-            if (!tokenResult || !tokenResult.success) {
-                throw new Error((tokenResult && tokenResult.message) || 'GitHub Token 保存失败');
-            }
-            elements.githubTokenInput.value = '';
-            elements.githubTokenInput.placeholder = '已配置（输入新 Token 可替换）';
-        }
-
         // 更新当前配置：合并而非替换，保留不在表单里的字段
         // （lastCheckInDate / checkInHistory / consecutiveDays）
         currentConfig = { ...currentConfig, ...newConfig };
@@ -425,18 +408,6 @@ async function saveConfig() {
     } catch (error) {
         console.error('保存配置失败:', error);
         showPageNotification('保存配置失败', 'error');
-    }
-}
-
-// 读取 Token 配置状态：只关心是否已设置，绝不显示原文
-async function loadGitHubTokenStatus() {
-    try {
-        const result = await sendMessage({ action: 'getGitHubTokenStatus' });
-        elements.githubTokenInput.placeholder = result && result.configured
-            ? '已配置（输入新 Token 可替换）'
-            : 'github_pat_...';
-    } catch (error) {
-        console.warn('读取 GitHub Token 状态失败:', error);
     }
 }
 
@@ -782,6 +753,17 @@ async function clearHistory() {
             config: config
         });
 
+        // 一并清除 Chrome/Edge 同步区里的签到按天记录
+        try {
+            const synced = await chrome.storage.sync.get(null);
+            const keys = Object.keys(synced).filter(k => k.startsWith('checkin:'));
+            if (keys.length > 0) {
+                await chrome.storage.sync.remove(keys);
+            }
+        } catch (error) {
+            console.log('清除同步的签到记录失败:', error.message);
+        }
+
         // 重新加载历史
         await loadHistory();
 
@@ -815,6 +797,15 @@ async function resetTodayStatus() {
             action: 'updateConfig',
             config: config
         });
+
+        // 同步区里今天的签到记录也要删掉，否则下一次合并会立刻
+        // 把 lastCheckInDate 恢复成今天。
+        try {
+            const syncKey = 'checkin:' + toLotteryDateKey(new Date());
+            await chrome.storage.sync.remove(syncKey);
+        } catch (error) {
+            console.log('清除今日同步记录失败:', error.message);
+        }
 
         // 重新加载历史
         await loadHistory();

@@ -8,7 +8,7 @@
 - `npm run test:ab`：额外用 `git show HEAD:content.js` 的旧版做 A/B 对比，仅供观察，不影响退出码。
 - `npm run test:lottery`：约 1 秒。校验抽奖门禁（`free_count=0` 绝不调 draw）、奖品名取值、当天已有中奖不被 skipped 覆盖、跨设备同步中奖的展示优先级。改抽奖逻辑后必须跑。
 - `npm run test:cloud-lottery`：约 1 秒。校验云端抽奖同样遵守 `free_count=0` 绝不调 draw、draw 必须带 `?aid=2608`、配置异常不抽奖、只读配置接口超时自动重试。改 `scripts/cloud-lottery.mjs` 后必须跑。
-- `npm run test:github-sync`：约 1 秒。校验本机抽奖回传 GitHub：开关/Token 缺失不发请求、保留云端已有记录、重复奖品不写入、SHA 冲突重试。改回传逻辑后必须跑。
+- `npm run test:sync`：约 1 秒。校验签到记录跨设备同步：签到成功写 `chrome.storage.sync`、关闭开关不写、其他设备记录合并去重、今日已签补写 `lastCheckInDate`、插件不再写 GitHub。改签到同步逻辑后必须跑。
 - `npm run test:missed`：约 1 秒。校验过点未签巡查：过点且未签才补、已签/未到点/开关关闭不补、已有进行中签到让路、落库后清巡查闹钟。改巡查或 `updateCheckInHistory` 后必须跑。
 - `npm run test:date`：约 1 秒。校验抽奖日期归属只由 UTC+8 决定（子进程切换 TZ 覆盖 UTC-7 / UTC+8 / UTC+9 / UTC），含跨天/跨月/跨年边界。改 `shared/date.js` 或同步 key 后必须跑。
 - `npm run test:stats`：约 1 秒。校验连续天数（`cont_count`）与累计天数（`sum_count`）取自同一次 `get_counts`、无变化不写存储、失败/缺字段保留本地值。改统计同步逻辑后必须跑。
@@ -27,7 +27,7 @@
 - 三个闹钟：`dailyCheckIn`（每天 `checkInTime`）、`checkInRetry`（重试，状态存 `chrome.storage.session`）、`missedCheckInWatch`（过点未签巡查，30 分钟周期）。`setupDailyAlarm()` 同时创建前两者和巡查；`enabled:false` 时清巡查。`onStartup` 会清理残留签到标签页、补一次过点签到、重建闹钟（Chrome 对闹钟持久化"不保证"，且周期会漂移）。
 - `pendingCheckInTrigger` 只在 SW 存活期内有效，用于让巡查避开正在重试的签到；签到转入 alarms 重试后，巡查靠它让路。
 - **签到入口已迁到沸点页 `/pins`**：background 直接打开 `https://juejin.cn/pins`。`background.js` 和 `content.js` **各有一份** `isCheckInPageUrl()`（`checkin|lottery|pins|task|signin`），改判定标准时两处必须同步。按钮找不到时走 API 兜底，别再死磕 DOM 选择器。
-- action 清单（改名时所有发送/接收点同步）：background→content 为 `ping` / `checkIn` / `lotteryDraw`（后者仅 API 抽奖失败且有免费次数时触发）；popup/options→background 为 `getConfig` / `updateConfig` / `manualCheckIn` / `manualLottery` / `syncCheckInStatus` / `getMonthCheckIn` / `getCurrentPoint` / `getLotteryLog` / `getTodayLottery` / `getGitHubTokenStatus` / `saveGitHubToken`；background→popup 广播 `{action:'checkInCompleted', result}`（手动抽奖也复用该广播刷新 UI）。
+- action 清单（改名时所有发送/接收点同步）：background→content 为 `ping` / `checkIn` / `lotteryDraw`（后者仅 API 抽奖失败且有免费次数时触发）；popup/options→background 为 `getConfig` / `updateConfig` / `manualCheckIn` / `manualLottery` / `syncCheckInStatus` / `getMonthCheckIn` / `getCurrentPoint` / `getLotteryLog` / `getTodayLottery`；background→popup 广播 `{action:'checkInCompleted', result}`（手动抽奖也复用该广播刷新 UI）。
 - popup 的签到状态**以本地 `config.lastCheckInDate` 为准**（`updateCheckInStatus` 只比 `=== 今天`），所以网页签到 / 多设备 / 重装后本地无记录会误显示"未签到"。为此 popup 打开时会调 `syncCheckInStatus`，由 background 直接 `fetch` 服务端（SW 里带 cookie 是通的），已签到则用 `updateCheckInHistory` 补写本地再刷新 UI；本地已有记录则直接返回。
 - `manualCheckIn` 返回 `{success, alreadyCheckedIn?, pending?, skipped?, message}`。`pending` 表示已转入 alarms 重试，popup 须保持"签到中"并等 `checkInCompleted` 广播（成功失败都会广播，UI 以广播为准，不以单次响应定生死）。`enabled:false` 只拦截定时/巡查触发，手动签到始终放行。
 - `updateConfig` 是**合并语义**（`{...DEFAULT_CONFIG, ...已存, ...传入}`），调用方可只传部分字段；不要改成整体覆盖，否则会抹掉 `lastCheckInDate` / `checkInHistory` / `consecutiveDays` / `totalCheckInDays`。
@@ -59,8 +59,8 @@
   - **调用顺序**：服务端同步必须排在 `updateCheckInHistory` **之后**，否则会被本地推算的 0 冲掉（见 `finalizeCheckInSuccess` / `syncCheckInStatusFromServer`）。popup 用 `monthCheckInMonth==='YYYY-MM'` 判断本月统计是否可用。
 - **签到成功后自动抽奖**：`finalizeCheckInSuccess` 先播报签到终态（通知 + 广播），再 `runLottery(tabId)`——查 `free_count`，>0 才抽，否则 `skipped`。**两个抽奖接口都必须 `world:'MAIN'`**：`lottery_config/get` 在 SW 里直接 fetch 只拿到空 body；`lottery/draw` 还必须带 **`?aid=2608`**，否则表现为 `Failed to fetch`。**`free_count=0` 时 draw 会改扣 200 矿石/次**，无免费次数绝不调 draw。抽奖全程 best-effort，不影响签到结果；`autoLottery:false` 可关闭。
 - **云端签到后免费抽奖**：`scripts/checkin.mjs` 签到后调用 `scripts/cloud-lottery.mjs`，同样先查 `free_count`，>0 才 draw，一次运行最多抽一次、失败不重试（避免响应丢失后重复消耗）。结果写入 `.cloud/checkin-lottery.json` 并提交回 `main`；扩展通过 raw.githubusercontent.com 拉取，合并进 `lotteryResult` / `lotteryHistory` 并复用 `chrome.storage.sync`。`cloudLotterySync` 与 `githubRepo` **默认关闭/为空**，避免别人安装后连到原作者的公开记录；只有两者都配置完整时本机才让位给云端抽奖，否则继续本机抽奖。
-- **本机抽奖回传 GitHub（双向同步）**：`githubLotterySync` 默认关闭。开启并在设置页保存 fine-grained PAT 后，本机抽奖结果（won 必传，skipped/failed 也传，云端当天已中奖时本机 skipped 不覆盖）会调用 GitHub Contents API，把记录合并进 `.cloud/checkin-lottery.json`。另外 `syncCloudCheckInResult` 在「云端文件里今天没有记录、本机今天签到过且今天真的抽过（won/failed）」时，会通过 `pushLocalLotteryIfMissing` 补传一次，保证本机抽了云端也看得到；未开回传或今天没签到时绝不补传。Token 单独存 `chrome.storage.local.githubLotteryToken`，**绝不写进 `config` / `chrome.storage.sync` / 仓库**；PAT 只授予本仓库 `Contents: Read and write`。写入使用文件 SHA，遇到 409/422 会重读后重试一次。
-- **云端结果仓库必须由用户确认**：`cloudLotterySync` / `cloudRepoConfirmed` / `githubRepo` 三者都满足才请求 raw.githubusercontent.com；仓库留空时完全不发云端请求，只用本机签到与抽奖。本机回传（含补传）同样要求 `cloudRepoConfirmed`，因此别人拉取代码后默认不会写到原作者仓库。
+- **云端结果单向只读**：云端结果文件同时保存 `checkIns`（最近 90 条，字段 `date/status/contCount/sumCount/source`）。Actions 每次运行都会把本次签到写进去；扩展只通过 raw.githubusercontent.com 拉取，按 UTC+8 日期去重合并进 `config.checkInHistory`，**插件不再使用 PAT、不再写 GitHub**。`cloudLotterySync` / `cloudRepoConfirmed` / `githubRepo` 三者都满足才请求云端；仓库留空时完全不发请求。
+- **跨设备同步走 chrome.storage.sync**：签到记录按天写 `checkin:YYYY-MM-DD`（`syncCheckIn` 默认开启），抽奖记录按天写 `lottery:YYYY-MM-DD`（`syncLottery` 默认开启），依靠用户登录 Chrome / Edge 同步账号在设备间同步，不经过 GitHub。读取端按 UTC+8 日期去重；其他设备今天已签时本机补写 `lastCheckInDate`，避免重复签到。同步记录保留 90 天，`onStartup` 清理过期 key。
 - **无免费次数也落历史**：云端 `skipped` 会写入 `lotteryHistory` 并成为当天 `lotteryResult`，popup 显示“今日无免费抽奖机会”，设置页抽奖日历显示“未抽奖”。
 - **Action 重试**：签到步骤使用 `nick-fields/retry@v3`，最多 3 次、间隔 60 秒；只重跑整个脚本，`lottery/draw` 本身仍是一次调用，不会因超时重试重复抽奖。只读的 `lottery_config/get` 另有 3 次内部重试。
 - **插件内手动抽奖**：popup / 设置页“立即抽奖”走 `manualLottery`，同样先查 `free_count`；结果（含 skipped）写入本地历史。掘金网页里手动点的抽奖仍无法捕获，因为官方没有可用的个人抽奖记录接口。
