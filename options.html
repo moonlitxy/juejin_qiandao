@@ -8,237 +8,258 @@
 </head>
 <body>
     <div class="container">
-        <!-- 头部 -->
-        <div class="header">
-            <h1>⛏️ 掘金签到插件设置</h1>
-            <p class="subtitle">自定义你的自动签到体验</p>
-        </div>
-
-        <!-- 主要内容 -->
-        <div class="content">
-            <!-- 基本设置 -->
-            <section class="section">
-                <h2 class="section-title">基本设置</h2>
-
-                <div class="setting-group">
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">立即签到</h3>
-                            <p class="setting-desc">不想等到设定时间？点击立即执行一次签到</p>
-                        </div>
-                        <button type="button" class="btn-checkin" id="manualCheckInBtn">立即签到</button>
-                    </div>
-
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">启用自动签到</h3>
-                            <p class="setting-desc">开启后将自动执行每日签到</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="enabledToggle">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">签到时间</h3>
-                            <p class="setting-desc">设置每日自动签到的执行时间</p>
-                        </div>
-                        <input type="time" id="checkInTime" class="time-input">
-                    </div>
-
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">自动抽奖</h3>
-                            <p class="setting-desc">本机签到成功后自动用掉当天的免费抽奖机会（开启云端抽奖时由云端执行）</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="autoLotteryToggle">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
+        <header class="header">
+            <div class="brand">
+                <span class="brand-mark">掘</span>
+                <div class="brand-copy">
+                    <h1>掘金签到</h1>
+                    <p class="subtitle">偏好设置与签到记录</p>
                 </div>
-            </section>
+            </div>
+        </header>
 
-            <!-- 通知设置 -->
-            <section class="section">
-                <h2 class="section-title">通知设置</h2>
+        <main class="content">
+            <div class="dashboard">
+                <div class="dashboard-column">
+                    <!-- 日常设置 -->
+                    <section class="section">
+                        <h2 class="section-title">日常设置</h2>
 
-                <div class="setting-group">
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">签到成功通知</h3>
-                            <p class="setting-desc">签到成功时显示桌面通知</p>
+                        <div class="setting-block">
+                            <h3 class="group-title">签到</h3>
+                            <div class="setting-group">
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">立即签到</h3>
+                                        <p class="setting-desc">不想等到设定时间？点击立即执行一次签到</p>
+                                    </div>
+                                    <button type="button" class="btn-checkin" id="manualCheckInBtn">立即签到</button>
+                                </div>
+
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">启用自动签到</h3>
+                                        <p class="setting-desc">开启后将自动执行每日签到</p>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" id="enabledToggle">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">签到时间</h3>
+                                        <p class="setting-desc">设置每日自动签到的执行时间</p>
+                                    </div>
+                                    <input type="time" id="checkInTime" class="time-input">
+                                </div>
+
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">自动抽奖</h3>
+                                        <p class="setting-desc">本机签到成功后使用当天的免费抽奖机会</p>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" id="autoLotteryToggle">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                            </div>
                         </div>
-                        <label class="switch">
-                            <input type="checkbox" id="successNotification">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
 
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">签到失败通知</h3>
-                            <p class="setting-desc">签到失败时显示桌面通知</p>
+                        <div class="setting-block">
+                            <h3 class="group-title">通知</h3>
+                            <div class="setting-group">
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">签到成功通知</h3>
+                                        <p class="setting-desc">签到成功时显示桌面通知</p>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" id="successNotification">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">签到失败通知</h3>
+                                        <p class="setting-desc">签到失败时显示桌面通知</p>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" id="failureNotification">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                            </div>
                         </div>
-                        <label class="switch">
-                            <input type="checkbox" id="failureNotification">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                </div>
-            </section>
 
-            <!-- 高级设置 -->
-            <section class="section">
-                <h2 class="section-title">高级设置</h2>
+                        <div class="setting-block">
+                            <h3 class="group-title">高级</h3>
+                            <div class="setting-group">
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">签到重试次数</h3>
+                                        <p class="setting-desc">签到失败后的自动重试次数</p>
+                                    </div>
+                                    <select id="retryCount" class="select-input">
+                                        <option value="0">不重试</option>
+                                        <option value="1">1次</option>
+                                        <option value="2">2次</option>
+                                        <option value="3">3次</option>
+                                    </select>
+                                </div>
 
-                <div class="setting-group">
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">签到重试次数</h3>
-                            <p class="setting-desc">签到失败后的自动重试次数</p>
+                                <div class="setting-item">
+                                    <div class="setting-info">
+                                        <h3 class="setting-label">页面加载超时</h3>
+                                        <p class="setting-desc">等待掘金页面加载的超时时间（秒）</p>
+                                    </div>
+                                    <select id="loadTimeout" class="select-input">
+                                        <option value="10">10秒</option>
+                                        <option value="20">20秒</option>
+                                        <option value="30" selected>30秒</option>
+                                        <option value="60">60秒</option>
+                                    </select>
+                                </div>
+                            </div>
                         </div>
-                        <select id="retryCount" class="select-input">
-                            <option value="0">不重试</option>
-                            <option value="1">1次</option>
-                            <option value="2">2次</option>
-                            <option value="3">3次</option>
-                        </select>
-                    </div>
+                    </section>
 
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">页面加载超时</h3>
-                            <p class="setting-desc">等待掘金页面加载的超时时间（秒）</p>
-                        </div>
-                        <select id="loadTimeout" class="select-input">
-                            <option value="10">10秒</option>
-                            <option value="20">20秒</option>
-                            <option value="30" selected>30秒</option>
-                            <option value="60">60秒</option>
-                        </select>
-                    </div>
-                </div>
-            </section>
-
-            <!-- 签到日历 -->
-            <section class="section">
-                <h2 class="section-title">签到日历</h2>
-
-                <div class="calendar-container">
-                    <div class="calendar-header">
-                        <span class="calendar-month" id="calendarMonth">本月</span>
-                        <span class="calendar-summary" id="calendarSummary"></span>
-                    </div>
-                    <div class="calendar-grid" id="calendarGrid">
-                        <!-- 动态生成日历 -->
-                    </div>
-                    <div class="calendar-legend">
-                        <span class="legend-item"><i class="legend-dot checked"></i>已签到</span>
-                        <span class="legend-item"><i class="legend-dot miss"></i>漏签</span>
-                        <span class="legend-item"><i class="legend-dot today"></i>今天</span>
-                        <span class="legend-item"><i class="legend-dot future"></i>未到</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- 签到历史 -->
-            <section class="section">
-                <h2 class="section-title">签到历史</h2>
-
-                <div class="history-container">
-                    <div class="history-header">
-                        <span>最近的签到记录</span>
-                        <div class="history-actions">
-                            <button type="button" class="btn-text" id="resetTodayBtn">重置今日状态</button>
-                            <button type="button" class="btn-text" id="clearHistoryBtn">清空历史</button>
-                        </div>
-                    </div>
-
-                    <div class="history-list" id="historyList">
-                        <!-- 动态生成签到记录 -->
-                    </div>
-                </div>
-            </section>
-
-            <!-- 跨设备同步与抽奖日历 -->
-            <section class="section">
-                <h2 class="section-title">跨设备同步与抽奖日历</h2>
-
-                <div class="setting-group">
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">同步签到记录到其他设备</h3>
-                            <p class="setting-desc">通过 Chrome / Edge 账号同步签到历史（不经过 GitHub）</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="checkInSyncToggle">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">同步抽奖记录到其他设备</h3>
-                            <p class="setting-desc">通过 Chrome / Edge 账号同步抽奖记录（含 GitHub Actions 云端抽奖）</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="lotterySyncToggle">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">读取云端结果</h3>
-                            <p class="setting-desc">只读拉取 GitHub Actions 的签到与抽奖结果；开启后自动抽奖由云端执行，本机不重复抽奖</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="cloudLotterySyncToggle">
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="setting-item">
-                        <div class="setting-info">
-                            <h3 class="setting-label">云端结果仓库</h3>
-                            <p class="setting-desc">填写你自己的 GitHub 仓库（owner/repo），只读不写；留空则只用本机，不请求云端</p>
-                        </div>
-                        <input type="text" id="githubRepoInput" class="token-input"
-                               placeholder="owner/repo" autocomplete="off">
-                    </div>
                 </div>
 
-                <div class="calendar-container">
-                    <div class="calendar-header">
-                        <span class="calendar-month" id="lotteryCalendarMonth">本月</span>
-                        <div class="calendar-nav">
-                            <button type="button" class="btn-text" id="lotteryPrevMonth">上个月</button>
-                            <button type="button" class="btn-text" id="lotteryNextMonth">下个月</button>
+                <div class="dashboard-column">
+                    <!-- 签到日历 -->
+                    <section class="section">
+                        <h2 class="section-title">签到日历</h2>
+                        <div class="calendar-container">
+                            <div class="calendar-header">
+                                <span class="calendar-month" id="calendarMonth">本月</span>
+                                <span class="calendar-summary" id="calendarSummary"></span>
+                            </div>
+                            <div class="calendar-grid" id="calendarGrid">
+                                <!-- 动态生成日历 -->
+                            </div>
+                            <div class="calendar-legend">
+                                <span class="legend-item"><i class="legend-dot checked"></i>已签到</span>
+                                <span class="legend-item"><i class="legend-dot miss"></i>漏签</span>
+                                <span class="legend-item"><i class="legend-dot today"></i>今天</span>
+                                <span class="legend-item"><i class="legend-dot future"></i>未到</span>
+                            </div>
                         </div>
-                    </div>
-                    <div class="calendar-grid" id="lotteryCalendarGrid">
-                        <!-- 动态生成抽奖日历 -->
-                    </div>
-                    <div class="calendar-legend">
-                        <span class="legend-item"><i class="legend-dot lottery-won"></i>中奖</span>
-                        <span class="legend-item"><i class="legend-dot lottery-skipped"></i>未抽奖</span>
-                        <span class="legend-item"><i class="legend-dot lottery-failed"></i>失败</span>
-                        <span class="legend-item"><i class="legend-dot lottery-none"></i>无记录</span>
-                    </div>
+                    </section>
+
+                    <!-- 跨设备同步保持展开，避免藏在首屏下方 -->
+                    <section class="section">
+                        <h2 class="section-title">跨设备同步</h2>
+                        <div class="sync-grid">
+                            <div class="sync-tile">
+                                <span>同步签到</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="checkInSyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="sync-tile">
+                                <span>同步抽奖</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="lotterySyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="sync-tile">
+                                <span>读取云端</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="cloudLotterySyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="setting-item sync-repo">
+                            <div class="setting-info">
+                                <h3 class="setting-label">云端结果仓库</h3>
+                                <p class="setting-desc">GitHub 仓库 owner/repo，只读不写</p>
+                            </div>
+                            <input type="text" id="githubRepoInput" class="token-input"
+                                   placeholder="owner/repo" autocomplete="off">
+                        </div>
+                    </section>
+
                 </div>
 
-                <div class="lottery-actions">
-                    <button type="button" class="btn-text" id="manualLotteryBtn">立即抽奖</button>
-                    <button type="button" class="btn-text" id="clearLotteryBtn">清空抽奖记录</button>
-                </div>
-            </section>
-        </div>
+                <div class="dashboard-column">
+                    <!-- 抽奖日历 -->
+                    <section class="section">
+                        <h2 class="section-title">抽奖日历</h2>
+                        <div class="calendar-container">
+                            <div class="calendar-header">
+                                <span class="calendar-month" id="lotteryCalendarMonth">本月</span>
+                                <div class="calendar-nav">
+                                    <button type="button" class="btn-text" id="lotteryPrevMonth">上个月</button>
+                                    <button type="button" class="btn-text" id="lotteryNextMonth">下个月</button>
+                                </div>
+                            </div>
+                            <div class="calendar-grid" id="lotteryCalendarGrid">
+                                <!-- 动态生成抽奖日历 -->
+                            </div>
+                            <div class="calendar-legend">
+                                <span class="legend-item"><i class="legend-dot lottery-won"></i>中奖</span>
+                                <span class="legend-item"><i class="legend-dot lottery-skipped"></i>未抽奖</span>
+                                <span class="legend-item"><i class="legend-dot lottery-failed"></i>失败</span>
+                                <span class="legend-item"><i class="legend-dot lottery-none"></i>无记录</span>
+                            </div>
+                        </div>
 
-        <!-- 底部 -->
-        <div class="footer">
+                        <div class="lottery-actions">
+                            <button type="button" class="btn-text" id="manualLotteryBtn">立即抽奖</button>
+                            <button type="button" class="btn-text" id="clearLotteryBtn">清空抽奖记录</button>
+                        </div>
+                    </section>
+
+                    <button type="button" class="history-entry" id="openHistoryBtn">
+                        <span class="history-entry-icon">◷</span>
+                        <span class="history-entry-copy">
+                            <span class="history-entry-title">签到历史</span>
+                            <span class="history-entry-note">最近 30 天 · 查看全部</span>
+                        </span>
+                        <span class="history-entry-arrow">→</span>
+                    </button>
+                </div>
+            </div>
+        </main>
+
+        <footer class="footer">
             <button class="btn btn-secondary" id="resetBtn">重置设置</button>
             <button class="btn btn-primary" id="saveBtn">保存设置</button>
-        </div>
+        </footer>
+    </div>
+
+    <div class="history-drawer" id="historyDrawer" hidden>
+        <button type="button" class="history-backdrop" id="historyBackdrop" aria-label="关闭签到历史"></button>
+        <aside class="history-panel" role="dialog" aria-modal="true" aria-labelledby="historyDrawerTitle">
+            <div class="history-panel-header">
+                <div>
+                    <h2 id="historyDrawerTitle">签到历史</h2>
+                    <p>最近 30 天的签到记录</p>
+                </div>
+                <button type="button" class="history-close" id="closeHistoryBtn" aria-label="关闭签到历史">×</button>
+            </div>
+
+            <div class="history-container">
+                <div class="history-header">
+                    <span>最近的签到记录</span>
+                    <div class="history-actions">
+                        <button type="button" class="btn-text" id="resetTodayBtn">重置今日状态</button>
+                        <button type="button" class="btn-text" id="clearHistoryBtn">清空历史</button>
+                    </div>
+                </div>
+
+                <div class="history-list" id="historyList">
+                    <!-- 动态生成签到记录 -->
+                </div>
+            </div>
+        </aside>
     </div>
 
     <!-- 共享脚本 -->

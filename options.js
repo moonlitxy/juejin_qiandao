@@ -20,6 +20,7 @@ const MANUAL_LOTTERY_TIMEOUT = 90000;
 // 抽奖日历：全量记录缓存 + 当前查看的年月（0 表示尚未初始化，用当前月）
 let lotteryLogCache = [];
 let lotteryView = { year: 0, month: 0 };
+let historyDrawerCloseTimer = null;
 
 // 设置表单字段与配置字段的对应关系（回显 / 脏检查 / 重置共用）
 // options 页只处理这几项；lastCheckInDate、checkInHistory 等运行时字段不在表单里
@@ -64,7 +65,11 @@ const elements = {
     clearHistoryBtn: null,
     clearLotteryBtn: null,
     manualLotteryBtn: null,
-    resetTodayBtn: null
+    resetTodayBtn: null,
+    openHistoryBtn: null,
+    historyDrawer: null,
+    historyBackdrop: null,
+    closeHistoryBtn: null
 };
 
 // 初始化
@@ -96,6 +101,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.clearLotteryBtn = document.getElementById('clearLotteryBtn');
     elements.manualLotteryBtn = document.getElementById('manualLotteryBtn');
     elements.resetTodayBtn = document.getElementById('resetTodayBtn');
+    elements.openHistoryBtn = document.getElementById('openHistoryBtn');
+    elements.historyDrawer = document.getElementById('historyDrawer');
+    elements.historyBackdrop = document.getElementById('historyBackdrop');
+    elements.closeHistoryBtn = document.getElementById('closeHistoryBtn');
 
     // 绑定事件
     bindEventListeners();
@@ -196,6 +205,38 @@ function bindEventListeners() {
             await resetTodayStatus();
         }
     });
+
+    elements.openHistoryBtn.addEventListener('click', openHistoryDrawer);
+    elements.closeHistoryBtn.addEventListener('click', closeHistoryDrawer);
+    elements.historyBackdrop.addEventListener('click', closeHistoryDrawer);
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeHistoryDrawer();
+        }
+    });
+}
+
+function openHistoryDrawer() {
+    clearTimeout(historyDrawerCloseTimer);
+    elements.historyDrawer.hidden = false;
+    document.body.classList.add('drawer-open');
+    requestAnimationFrame(() => {
+        elements.historyDrawer.classList.add('is-open');
+        elements.closeHistoryBtn.focus();
+    });
+    loadHistory();
+}
+
+function closeHistoryDrawer() {
+    if (elements.historyDrawer.hidden) {
+        return;
+    }
+    elements.historyDrawer.classList.remove('is-open');
+    document.body.classList.remove('drawer-open');
+    historyDrawerCloseTimer = setTimeout(() => {
+        elements.historyDrawer.hidden = true;
+        historyDrawerCloseTimer = null;
+    }, 240);
 }
 
 // 处理手动签到（与 popup 同一套 pending 协议）
