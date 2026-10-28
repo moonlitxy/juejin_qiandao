@@ -20,7 +20,7 @@
 
         <main class="content">
             <div class="dashboard">
-                <div class="dashboard-column">
+                <div class="dashboard-column column-daily">
                     <!-- 日常设置 -->
                     <section class="section">
                         <h2 class="section-title">日常设置</h2>
@@ -129,7 +129,7 @@
 
                 </div>
 
-                <div class="dashboard-column">
+                <div class="dashboard-column column-signin">
                     <!-- 签到日历 -->
                     <section class="section">
                         <h2 class="section-title">签到日历</h2>
@@ -150,45 +150,9 @@
                         </div>
                     </section>
 
-                    <!-- 跨设备同步保持展开，避免藏在首屏下方 -->
-                    <section class="section">
-                        <h2 class="section-title">跨设备同步</h2>
-                        <div class="sync-grid">
-                            <div class="sync-tile">
-                                <span>同步签到</span>
-                                <label class="switch">
-                                    <input type="checkbox" id="checkInSyncToggle">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                            <div class="sync-tile">
-                                <span>同步抽奖</span>
-                                <label class="switch">
-                                    <input type="checkbox" id="lotterySyncToggle">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                            <div class="sync-tile">
-                                <span>读取云端</span>
-                                <label class="switch">
-                                    <input type="checkbox" id="cloudLotterySyncToggle">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="setting-item sync-repo">
-                            <div class="setting-info">
-                                <h3 class="setting-label">云端结果仓库</h3>
-                                <p class="setting-desc">GitHub 仓库 owner/repo，只读不写</p>
-                            </div>
-                            <input type="text" id="githubRepoInput" class="token-input"
-                                   placeholder="owner/repo" autocomplete="off">
-                        </div>
-                    </section>
-
                 </div>
 
-                <div class="dashboard-column">
+                <div class="dashboard-column column-lottery">
                     <!-- 抽奖日历 -->
                     <section class="section">
                         <h2 class="section-title">抽奖日历</h2>
@@ -217,6 +181,52 @@
                         </div>
                     </section>
 
+                </div>
+
+                <div class="dashboard-column column-sync">
+                    <section class="section">
+                        <h2 class="section-title">跨设备同步</h2>
+                        <div class="sync-grid">
+                            <div class="sync-tile">
+                                <span>同步签到</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="checkInSyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="sync-tile">
+                                <span>同步抽奖</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="lotterySyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="sync-tile">
+                                <span>读取云端</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="cloudLotterySyncToggle">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="setting-item sync-repo">
+                            <div class="setting-info">
+                                <h3 class="setting-label">云端结果仓库</h3>
+                                <p class="setting-desc">填写完整 GitHub 仓库地址，只读不写</p>
+                            </div>
+                            <input type="text" id="githubRepoInput" class="token-input"
+                                   placeholder="https://github.com/owner/repo"
+                                   autocomplete="off" disabled>
+                        </div>
+                        <a class="official-repo-row"
+                           href="https://github.com/moonlitxy/juejin_qiandao"
+                           target="_blank"
+                           rel="noopener noreferrer">
+                            <span class="official-repo-label">官方仓库</span>
+                            <span class="official-repo-value">打开 <span aria-hidden="true">↗</span></span>
+                        </a>
+                    </section>
+
                     <button type="button" class="history-entry" id="openHistoryBtn">
                         <span class="history-entry-icon">◷</span>
                         <span class="history-entry-copy">
@@ -230,8 +240,10 @@
         </main>
 
         <footer class="footer">
-            <button class="btn btn-secondary" id="resetBtn">重置设置</button>
-            <button class="btn btn-primary" id="saveBtn">保存设置</button>
+            <div class="footer-actions">
+                <button class="btn btn-secondary" id="resetBtn">重置设置</button>
+                <button class="btn btn-primary" id="saveBtn">保存设置</button>
+            </div>
         </footer>
     </div>
 

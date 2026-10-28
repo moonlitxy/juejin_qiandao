@@ -14,6 +14,7 @@
     --surface-strong: rgba(255, 255, 255, 0.92);
     --surface-soft: rgba(247, 247, 250, 0.9);
     --shadow: 0 10px 34px rgba(0, 0, 0, 0.065);
+    --calendar-card-height: 433px;
 }
 
 * {
@@ -37,7 +38,7 @@ body {
 }
 
 .container {
-    max-width: 1180px;
+    max-width: 1400px;
     min-height: 100vh;
     margin: 0 auto;
     display: flex;
@@ -49,6 +50,8 @@ body {
     padding: 20px 28px 8px;
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .brand {
@@ -91,7 +94,8 @@ body {
 
 .dashboard {
     display: grid;
-    grid-template-columns: minmax(300px, 1.12fr) minmax(300px, 1fr) minmax(300px, 1fr);
+    grid-template-columns: minmax(320px, 1.2fr) minmax(270px, 1fr) minmax(270px, 1fr) minmax(260px, 0.95fr);
+    grid-template-areas: "daily signin lottery sync";
     gap: 18px;
     align-items: stretch;
 }
@@ -103,6 +107,23 @@ body {
     flex-direction: column;
     gap: 18px;
 }
+
+.column-sync .sync-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.column-sync {
+    gap: 10px;
+}
+
+.column-sync .history-entry {
+    margin-top: 0;
+}
+
+.column-daily { grid-area: daily; }
+.column-signin { grid-area: signin; }
+.column-lottery { grid-area: lottery; }
+.column-sync { grid-area: sync; }
 
 .section {
     padding: 16px;
@@ -170,6 +191,41 @@ body {
 
 .sync-repo {
     margin-top: 6px;
+}
+
+.column-sync .sync-repo {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.column-sync .sync-repo .token-input {
+    width: 100%;
+    margin-top: 6px;
+}
+
+.official-repo-row {
+    margin-top: 4px;
+    padding: 7px 7px 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    text-decoration: none;
+    transition: background 0.16s ease;
+}
+
+.official-repo-row:hover {
+    background: var(--surface-soft);
+}
+
+.official-repo-value {
+    color: var(--blue);
+    font-weight: 500;
+    white-space: nowrap;
 }
 
 .setting-item {
@@ -272,7 +328,15 @@ body {
 }
 
 .select-input {
-    min-width: 104px;
+    width: 100px;
+    min-width: 100px;
+    margin-right: 6px;
+    padding-right: 25px;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%2386868b' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 10px;
 }
 
 .token-input {
@@ -286,6 +350,12 @@ body {
     outline: none;
     border-color: var(--blue);
     box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.token-input:disabled {
+    color: var(--tertiary);
+    background: rgba(242, 242, 247, 0.9);
+    cursor: not-allowed;
 }
 
 .btn-checkin {
@@ -373,6 +443,15 @@ body {
     color: #3a3a3c;
     background: rgba(247, 247, 250, 0.84);
     font-size: 11px;
+}
+
+.column-signin .section,
+.column-lottery .section {
+    min-height: var(--calendar-card-height);
+}
+
+.column-signin .calendar-day {
+    height: 48px;
 }
 
 .calendar-day.empty {
@@ -791,11 +870,17 @@ body.drawer-open {
     z-index: 20;
     padding: 12px 28px;
     display: flex;
+    align-items: center;
     justify-content: flex-end;
     gap: 10px;
     border-top: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.78);
     backdrop-filter: blur(24px) saturate(160%);
+}
+
+.footer-actions {
+    display: flex;
+    gap: 10px;
 }
 
 .btn {
@@ -860,19 +945,21 @@ body.drawer-open {
 @media (max-width: 1100px) {
     .dashboard {
         grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+        grid-template-areas:
+            "daily signin"
+            "lottery sync";
     }
 
-    .dashboard-column:nth-child(3) {
-        grid-column: 1 / -1;
+    .column-sync .sync-repo {
+        flex-direction: row;
+        align-items: center;
     }
 
-    .dashboard-column:nth-child(3) .calendar-grid {
-        gap: 6px;
+    .column-sync .sync-repo .token-input {
+        width: 150px;
+        margin-top: 0;
     }
 
-    .dashboard-column:nth-child(3) .calendar-day.lottery-day {
-        height: 48px;
-    }
 }
 
 @media (max-width: 800px) {
@@ -886,12 +973,15 @@ body.drawer-open {
 
     .dashboard {
         grid-template-columns: 1fr;
+        grid-template-areas:
+            "daily"
+            "signin"
+            "lottery"
+            "sync";
         gap: 14px;
     }
 
-    .dashboard-column,
-    .dashboard-column:nth-child(3) {
-        grid-column: auto;
+    .dashboard-column {
         gap: 14px;
     }
 

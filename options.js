@@ -209,6 +209,7 @@ function bindEventListeners() {
     elements.openHistoryBtn.addEventListener('click', openHistoryDrawer);
     elements.closeHistoryBtn.addEventListener('click', closeHistoryDrawer);
     elements.historyBackdrop.addEventListener('click', closeHistoryDrawer);
+    elements.cloudLotterySyncToggle.addEventListener('change', syncCloudRepoState);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
             closeHistoryDrawer();
@@ -404,12 +405,51 @@ function applyFormValues(config, force = false) {
         const value = currentConfig[field.key];
         elements[field.el][field.type] = field.fallback(value);
     });
+    elements.githubRepoInput.value = formatGitHubRepoUrl(currentConfig.githubRepo);
+    elements.githubRepoInput.title = elements.githubRepoInput.value;
+    syncCloudRepoState();
+}
+
+function formatGitHubRepoUrl(repo) {
+    const normalized = normalizeGitHubRepoInput(repo);
+    return normalized ? `https://github.com/${normalized}` : '';
+}
+
+function normalizeGitHubRepoInput(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+        return '';
+    }
+    const urlMatch = raw.match(/^https?:\/\/github\.com\/([^/\s]+)\/([^/\s?#]+)/i);
+    if (urlMatch) {
+        return `${urlMatch[1]}/${urlMatch[2].replace(/\.git$/i, '')}`;
+    }
+    return raw
+        .replace(/^github\.com\//i, '')
+        .replace(/^\/+|\/+$/g, '')
+        .replace(/\.git$/i, '');
+}
+
+function isValidGitHubRepo(repo) {
+    return /^[^/\s]+\/[^/\s]+$/.test(repo || '');
+}
+
+function syncCloudRepoState() {
+    const enabled = elements.cloudLotterySyncToggle.checked;
+    elements.githubRepoInput.disabled = !enabled;
+    elements.githubRepoInput.placeholder = enabled
+        ? 'https://github.com/owner/repo'
+        : '请先开启读取云端';
 }
 
 // 表单当前值与上次回显的配置是否不一致
 // 必须按字符串比较：<select> 的 value 是字符串（'1'），而配置里是数字（1）
 function isFormDirty() {
     return FORM_FIELDS.some(field => {
+        if (field.key === 'githubRepo') {
+            return normalizeGitHubRepoInput(elements.githubRepoInput.value)
+                !== String(currentConfig.githubRepo || '');
+        }
         const current = String(elements[field.el][field.type]);
         return current !== String(field.fallback(currentConfig[field.key]));
     });
@@ -418,6 +458,12 @@ function isFormDirty() {
 // 保存配置
 async function saveConfig() {
     try {
+        const githubRepo = normalizeGitHubRepoInput(elements.githubRepoInput.value);
+        if (githubRepo && !isValidGitHubRepo(githubRepo)) {
+            showPageNotification('请输入完整的 GitHub 仓库地址，例如 https://github.com/owner/repo', 'error');
+            return;
+        }
+
         // 收集表单数据
         const newConfig = {
             enabled: elements.enabledToggle.checked,
@@ -426,8 +472,8 @@ async function saveConfig() {
             syncCheckIn: elements.checkInSyncToggle.checked,
             syncLottery: elements.lotterySyncToggle.checked,
             cloudLotterySync: elements.cloudLotterySyncToggle.checked,
-            githubRepo: elements.githubRepoInput.value.trim(),
-            cloudRepoConfirmed: !!elements.githubRepoInput.value.trim(),
+            githubRepo,
+            cloudRepoConfirmed: !!githubRepo,
             successNotification: elements.successNotification.checked,
             failureNotification: elements.failureNotification.checked,
             retryCount: parseInt(elements.retryCount.value),
@@ -443,6 +489,8 @@ async function saveConfig() {
         // 更新当前配置：合并而非替换，保留不在表单里的字段
         // （lastCheckInDate / checkInHistory / consecutiveDays）
         currentConfig = { ...currentConfig, ...newConfig };
+        elements.githubRepoInput.value = formatGitHubRepoUrl(githubRepo);
+        elements.githubRepoInput.title = elements.githubRepoInput.value;
 
         showPageNotification('设置已保存', 'success');
 
