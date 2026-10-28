@@ -340,15 +340,15 @@ function updateLotteryStatus(config) {
     section.hidden = false;
     elements.lotteryIcon.className = 'lottery-icon';
     if (record.status === 'won') {
-        elements.lotteryIcon.textContent = '🎁';
+        elements.lotteryIcon.textContent = '✦';
         elements.lotteryText.textContent = record.prizeName
             ? `抽中：${record.prizeName}`
             : (record.message || '抽奖成功');
     } else if (record.status === 'skipped') {
-        elements.lotteryIcon.textContent = '🎟️';
+        elements.lotteryIcon.textContent = '○';
         elements.lotteryText.textContent = record.message || '今日无免费抽奖机会';
     } else {
-        elements.lotteryIcon.textContent = '⚠️';
+        elements.lotteryIcon.textContent = '!';
         elements.lotteryText.textContent = record.message || '抽奖失败';
     }
 }
