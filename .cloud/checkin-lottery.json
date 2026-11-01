@@ -1,14 +1,24 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-31T22:59:49.373Z",
+  "updatedAt": "2026-11-01T23:20:09.094Z",
   "latestCheckIn": {
-    "date": "2026-10-31T22:59:47.255Z",
-    "status": "checked",
+    "date": "2026-11-01T23:20:08.766Z",
+    "status": "already_checked",
     "source": "cloud",
-    "contCount": 36,
-    "sumCount": 379
+    "contCount": 37,
+    "sumCount": 380
   },
   "records": [
+    {
+      "date": "2026-11-01T23:20:09.093Z",
+      "runId": "41361526939-1",
+      "status": "skipped",
+      "prizeName": null,
+      "prizeImage": null,
+      "lotteryType": null,
+      "message": "今日无免费抽奖机会",
+      "freeCount": 0
+    },
     {
       "date": "2026-10-31T22:59:49.372Z",
       "runId": "41250560509-1",
@@ -91,6 +101,13 @@
     }
   ],
   "checkIns": [
+    {
+      "date": "2026-11-01T23:20:08.766Z",
+      "status": "already_checked",
+      "contCount": 37,
+      "sumCount": 380,
+      "source": "cloud"
+    },
     {
       "date": "2026-10-31T22:59:47.255Z",
       "status": "checked",
