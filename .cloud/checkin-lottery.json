@@ -1,14 +1,24 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-11T00:24:07.769Z",
+  "updatedAt": "2026-11-12T01:46:30.466Z",
   "latestCheckIn": {
-    "date": "2026-11-11T00:24:04.922Z",
-    "status": "checked",
+    "date": "2026-11-12T01:46:29.265Z",
+    "status": "already_checked",
     "source": "cloud",
-    "contCount": 46,
-    "sumCount": 389
+    "contCount": 47,
+    "sumCount": 390
   },
   "records": [
+    {
+      "date": "2026-11-12T01:46:30.465Z",
+      "runId": "43136726146-1",
+      "status": "won",
+      "prizeName": "72矿石",
+      "prizeImage": "https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/32ed6a7619934144882d841761b63d3c~tplv-k3u1fbpfcp-no-mark:0:0:0:0.image",
+      "lotteryType": 1,
+      "message": "抽中 72矿石",
+      "freeCount": 1
+    },
     {
       "date": "2026-11-11T00:24:07.768Z",
       "runId": "42930968154-1",
@@ -191,6 +201,13 @@
     }
   ],
   "checkIns": [
+    {
+      "date": "2026-11-12T01:46:29.265Z",
+      "status": "already_checked",
+      "contCount": 47,
+      "sumCount": 390,
+      "source": "cloud"
+    },
     {
       "date": "2026-11-11T00:24:04.922Z",
       "status": "checked",
