@@ -11,6 +11,8 @@ importScripts('shared/date.js');
 // 过点未签巡查闹钟：周期与单次补签的重试上限（分钟）
 const MISSED_CHECK_IN_ALARM = 'missedCheckInWatch';
 const MISSED_CHECK_IN_INTERVAL_MIN = 30;
+// 签到标签页关闭闹钟：SW 休眠会丢 setTimeout，用闹钟保证最终一定被唤醒清理
+const CLOSE_CHECK_IN_TAB_ALARM = 'closeCheckInTab';
 const PENDING_CHECK_IN_RETRY_MIN = 10;
 const CLOUD_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const CLOUD_RESULT_PATH = '.cloud/checkin-lottery.json';
@@ -170,6 +172,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } else if (alarm.name === MISSED_CHECK_IN_ALARM) {
         console.log('过点未签巡查触发');
         await checkMissedCheckIn('巡查');
+    } else if (alarm.name === CLOSE_CHECK_IN_TAB_ALARM) {
+        // setTimeout 随 SW 休眠丢失时的兜底：闹钟能把 SW 唤醒
+        await cleanupOrphanTab();
     }
 });
 
@@ -297,7 +302,9 @@ async function performCheckIn(resumeState = null, trigger = 'auto', tabId = null
     } catch (error) {
         console.error('签到过程出错:', error);
         // config 可能为 null（错误发生在读取配置之前），此时通知按默认行为显示
-        closeTabQuietly(openedTabId);
+        // 重试恢复时 openedTabId 为空，但 resumeState 里的标签页同样需要关闭
+        const leftoverTabId = openedTabId !== null ? openedTabId : (resumeState?.tabId ?? null);
+        closeTabQuietly(leftoverTabId);
         return finalizeCheckInFailure(error.message || '签到过程出错', config);
     } finally {
         pendingCheckInTrigger = null;
@@ -305,17 +312,29 @@ async function performCheckIn(resumeState = null, trigger = 'auto', tabId = null
 }
 
 // 尽力关闭签到用的标签页：延迟让结果可见；MV3 下 SW 可能先休眠导致 setTimeout 丢失，
-// 故同时在 storage.session 记一笔，SW 下次唤醒时（onStartup）兜底清理
+// 故同时在 storage.session 记一笔并挂一个闹钟，SW 被唤醒或下次 onStartup 时兜底清理
 function closeTabQuietly(tabId, delayMs = 3000) {
     if (typeof tabId !== 'number') {
         return;
     }
     chrome.storage.session.set({ orphanTabId: tabId }).catch(() => {});
-    setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), delayMs);
+    chrome.alarms.create(CLOSE_CHECK_IN_TAB_ALARM, { when: Date.now() + delayMs });
+    setTimeout(() => {
+        chrome.tabs.remove(tabId).catch(() => {});
+        // 关闭成功后清掉兜底记录；已被别的关闭请求覆盖时（并发手动抽奖等）不动它
+        chrome.storage.session.get('orphanTabId').then(({ orphanTabId }) => {
+            if (orphanTabId !== tabId) {
+                return;
+            }
+            chrome.alarms.clear(CLOSE_CHECK_IN_TAB_ALARM);
+            return chrome.storage.session.remove('orphanTabId');
+        }).catch(() => {});
+    }, delayMs);
 }
 
 // 清理上次残留的签到标签页（只关仍是掘金页的那些，防 id 复用误关别的页面）
 async function cleanupOrphanTab() {
+    await chrome.alarms.clear(CLOSE_CHECK_IN_TAB_ALARM).catch(() => {});
     const { orphanTabId } = await chrome.storage.session.get('orphanTabId');
     if (typeof orphanTabId !== 'number') {
         return;
@@ -323,7 +342,9 @@ async function cleanupOrphanTab() {
     await chrome.storage.session.remove('orphanTabId');
     try {
         const tab = await chrome.tabs.get(orphanTabId);
-        if (tab.url && tab.url.includes('juejin.cn')) {
+        // 页面可能仍在加载，url 为空时看 pendingUrl
+        const url = tab.url || tab.pendingUrl || '';
+        if (url.includes('juejin.cn')) {
             await chrome.tabs.remove(orphanTabId);
             console.log('🧹 已关闭上次残留的签到标签页');
         }
@@ -489,12 +510,6 @@ async function runCheckInAttempt(state, resumeTabId = null) {
         }
     }
 
-    // 延迟关闭标签页（给用户看结果的时间）。
-    // 转入重试时（result 为 null）先别关：下一轮沿用同一个标签页。
-    if (result) {
-        closeTabQuietly(tabId);
-    }
-
     return result;
 }
 
@@ -560,6 +575,11 @@ async function finalizeCheckInSuccess(result, config, tabId = null) {
             broadcastCheckInResult({ ...result, success: true, message, lottery });
         }
     }
+
+    // 所有成功路径（content 响应 / API 兜底验证）最终都经过这里，
+    // 统一在抽奖结束后关闭标签页，避免 API 兜底分支提前 return 时漏关。
+    // 转入重试时不会走到这里，下一轮会沿用同一个标签页。
+    closeTabQuietly(tabId);
 
     // 回传结果，供 performCheckIn / manualCheckIn 使用
     return { ...result, success: true, message, lottery };
